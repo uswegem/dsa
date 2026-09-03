@@ -23,12 +23,19 @@ class Upload(Base):
     original_filename: Mapped[str] = mapped_column(String(500), nullable=False)
     storage_path: Mapped[str] = mapped_column(String(1000), nullable=False)
 
+    # The period the uploader selected for this upload, checked against the
+    # file's own dates on ingestion (DATE for Branch Manager, Disbursement
+    # date for Business Manager). Nullable only for rows created before this
+    # field existed; every upload going through the API sets it.
+    period_month: Mapped[int | None] = mapped_column(Integer)
+    period_year: Mapped[int | None] = mapped_column(Integer)
+
     status: Mapped[UploadStatus] = mapped_column(
         SAEnum(UploadStatus, name="upload_status"), nullable=False, default=UploadStatus.PENDING
     )
     total_rows: Mapped[int] = mapped_column(Integer, default=0)
-    valid_rows: Mapped[int] = mapped_column(Integer, default=0)
-    error_rows: Mapped[int] = mapped_column(Integer, default=0)
+    rows_accepted: Mapped[int] = mapped_column(Integer, default=0)  # ingested (inserted or updated) for the selected period
+    rows_rejected: Mapped[int] = mapped_column(Integer, default=0)  # failed validation - see upload_errors, excluded from ingestion
     warning_rows: Mapped[int] = mapped_column(Integer, default=0)
 
     failure_reason: Mapped[str | None] = mapped_column(Text)

@@ -1,19 +1,33 @@
+import datetime as dt
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_business_manager, require_branch_manager, require_any
-from app.models import Branch, BranchSale, BusinessTransaction, Upload, UploadError, User
+from app.models import Branch, BranchSale, Upload, UploadError, User
 from app.models.enums import UploadStatus, UploadType, UserRole
-from app.schemas.upload import UploadDetailOut, UploadOut
+from app.schemas.upload import UploadDetailOut, UploadOut, UploadSubmitResult
 from app.services.audit import log_action
 from app.services.ingest_branch_manager import parse_branch_manager_file
 from app.services.ingest_business_manager import parse_business_manager_file
 from app.services.matching import run_matching
 from app.services.roster_sync import sync_roster_from_branch_sales
 from app.services.storage import save_upload_file
+from app.services.upsert import upsert_branch_sale, upsert_business_transaction
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
+
+MIN_PERIOD_YEAR = 2000
+MAX_PERIOD_YEAR = 2100
+
+
+def _validate_period(period_month: int, period_year: int) -> None:
+    if not (1 <= period_month <= 12):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "period_month must be between 1 and 12")
+    if not (MIN_PERIOD_YEAR <= period_year <= MAX_PERIOD_YEAR):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"period_year must be between {MIN_PERIOD_YEAR} and {MAX_PERIOD_YEAR}")
 
 
 def _scope_uploads_query(db: Session, current_user: User):
@@ -23,23 +37,30 @@ def _scope_uploads_query(db: Session, current_user: User):
     return q
 
 
-@router.post("/branch-manager", response_model=UploadDetailOut)
+def _resolve_branch_by_name(db: Session, name: str) -> Branch | None:
+    return db.query(Branch).filter(func.lower(Branch.name) == name.strip().lower()).first()
+
+
+@router.post("/branch-manager", response_model=UploadSubmitResult)
 async def upload_branch_manager_file(
     file: UploadFile = File(...),
+    period_month: int = Form(...),
+    period_year: int = Form(...),
     branch_id: int | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_branch_manager),
 ):
-    if current_user.role == UserRole.BRANCH_MANAGER:
-        target_branch_id = current_user.branch_id
-    else:  # ADMIN
-        if branch_id is None:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "branch_id is required for admin uploads")
-        target_branch_id = branch_id
-
-    branch = db.get(Branch, target_branch_id)
-    if branch is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Branch not found")
+    """Roster/attribution upload. Accepts a single-sheet file (one branch)
+    or a multi-sheet workbook (one sheet per branch, sheet name = branch
+    name) for bulk/migration loads. Every row is upserted on
+    (client_account_no, period_month, period_year) - a re-upload for a
+    period already in progress updates existing rows rather than
+    duplicating them. Rows whose DATE falls outside period_month/period_year
+    (or is missing/unparseable) are rejected, not silently accepted.
+    """
+    _validate_period(period_month, period_year)
+    if current_user.role == UserRole.BRANCH_MANAGER and current_user.branch_id is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Your account has no assigned branch - contact an admin.")
 
     contents = await file.read()
     storage_path = save_upload_file(contents, file.filename, "branch_manager")
@@ -47,83 +68,137 @@ async def upload_branch_manager_file(
     upload = Upload(
         upload_type=UploadType.BRANCH_MANAGER,
         uploaded_by_user_id=current_user.id,
-        branch_id=target_branch_id,
+        branch_id=current_user.branch_id if current_user.role == UserRole.BRANCH_MANAGER else branch_id,
+        period_month=period_month,
+        period_year=period_year,
         original_filename=file.filename,
         storage_path=storage_path,
         status=UploadStatus.PROCESSING,
     )
     db.add(upload)
     db.flush()
-    log_action(db, current_user.id, "UPLOAD_CREATED", "Upload", upload.id, upload_type="BRANCH_MANAGER", branch_id=target_branch_id)
+    log_action(
+        db, current_user.id, "UPLOAD_CREATED", "Upload", upload.id,
+        upload_type="BRANCH_MANAGER", period=f"{period_year}-{period_month:02d}",
+    )
 
     try:
-        parsed = parse_branch_manager_file(storage_path)
+        parsed = parse_branch_manager_file(storage_path, period_month, period_year)
     except ValueError as e:
         upload.status = UploadStatus.FAILED
         upload.failure_reason = str(e)
         db.commit()
         db.refresh(upload)
-        return upload
+        return UploadSubmitResult.model_validate(upload)
 
-    saved_rows: list[BranchSale] = []
+    # group parsed rows by their source sheet, then resolve one branch per sheet
+    rows_by_sheet: dict[str, list] = {}
     for row in parsed.rows:
-        bs = BranchSale(
-            upload_id=upload.id,
-            branch_id=target_branch_id,
-            row_number=row.row_number,
-            loan_date=row.loan_date,
-            client_name=row.client_name,
-            client_check_no=row.client_check_no,
-            client_account_no=row.client_account_no,
-            application_number_ess=row.application_number_ess,
-            reported_amount=row.reported_amount,
-            branch_name_raw=row.branch_raw,
-            dsa_code=row.dsa_code,
-            dsa_account_no=row.dsa_account_no,
-            dsa_name=row.dsa_name,
-            dtl_name=row.dtl_name,
-            dtl_code=row.dtl_code,
-            date_out_of_period_warning=row.date_out_of_period_warning,
-        )
-        db.add(bs)
-        saved_rows.append(bs)
+        rows_by_sheet.setdefault(row.sheet_name, []).append(row)
+
+    sheet_names = list(rows_by_sheet.keys())
+    is_multi_sheet = len(sheet_names) > 1
+    sheet_level_rejected_rows = 0  # rows excluded because their sheet's branch couldn't be used/resolved
+
+    if current_user.role == UserRole.BRANCH_MANAGER:
+        own_branch = db.get(Branch, current_user.branch_id)
+        for sheet_name in sheet_names:
+            if is_multi_sheet and (own_branch is None or sheet_name.strip().lower() != own_branch.name.strip().lower()):
+                skipped_rows = rows_by_sheet.pop(sheet_name)
+                sheet_level_rejected_rows += len(skipped_rows)
+                db.add(UploadError(
+                    upload_id=upload.id, row_number=0, severity="ERROR", column_name=None,
+                    message=f"Sheet '{sheet_name}' ({len(skipped_rows)} rows) skipped - you can only upload data for your own branch.",
+                ))
+        sheet_branch: dict[str, Branch] = {s: own_branch for s in rows_by_sheet}
+    else:  # ADMIN
+        sheet_branch = {}
+        if not is_multi_sheet:
+            sole_sheet = sheet_names[0] if sheet_names else None
+            resolved = None
+            if branch_id is not None:
+                resolved = db.get(Branch, branch_id)
+            elif sole_sheet is not None:
+                resolved = _resolve_branch_by_name(db, sole_sheet)
+            if resolved is None:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Could not determine the target branch - pass branch_id, or name the sheet after an existing branch.",
+                )
+            if sole_sheet is not None:
+                sheet_branch[sole_sheet] = resolved
+        else:
+            for sheet_name in sheet_names:
+                resolved = _resolve_branch_by_name(db, sheet_name)
+                if resolved is None:
+                    skipped_rows = rows_by_sheet.pop(sheet_name)
+                    sheet_level_rejected_rows += len(skipped_rows)
+                    db.add(UploadError(
+                        upload_id=upload.id, row_number=0, severity="ERROR", column_name=None,
+                        message=f"Sheet '{sheet_name}' ({len(skipped_rows)} rows) skipped - no branch named '{sheet_name}' exists.",
+                    ))
+                else:
+                    sheet_branch[sheet_name] = resolved
+
+    created = updated = unchanged = 0
+    touched_rows: list[BranchSale] = []
+    for sheet_name, rows in rows_by_sheet.items():
+        branch = sheet_branch[sheet_name]
+        for parsed_row in rows:
+            saved_row, outcome = upsert_branch_sale(
+                db, upload.id, branch.id, period_month, period_year, parsed_row, current_user.id
+            )
+            touched_rows.append(saved_row)
+            if outcome.created:
+                created += 1
+            elif outcome.changed:
+                updated += 1
+            else:
+                unchanged += 1
     db.flush()
 
     for issue in parsed.issues:
-        db.add(
-            UploadError(
-                upload_id=upload.id,
-                row_number=issue.row_number,
-                severity=issue.severity,
-                column_name=issue.column_name,
-                message=issue.message,
-            )
-        )
+        db.add(UploadError(
+            upload_id=upload.id, row_number=issue.row_number, severity=issue.severity,
+            column_name=issue.column_name, message=f"[{issue.sheet_name}] {issue.message}" if issue.sheet_name else issue.message,
+        ))
 
-    sync_roster_from_branch_sales(db, saved_rows, upload.uploaded_at.date() if upload.uploaded_at else __import__("datetime").date.today())
+    sync_roster_from_branch_sales(db, touched_rows, upload.uploaded_at.date() if upload.uploaded_at else dt.date.today())
 
     upload.total_rows = parsed.total_data_rows_seen
-    upload.valid_rows = len(saved_rows)
-    upload.error_rows = sum(1 for i in parsed.issues if i.severity == "ERROR")
+    upload.rows_accepted = created + updated + unchanged
+    upload.rows_rejected = sum(1 for i in parsed.issues if i.severity == "ERROR") + sheet_level_rejected_rows
     upload.warning_rows = sum(1 for i in parsed.issues if i.severity == "WARNING")
     upload.status = UploadStatus.PROCESSED
-    import datetime as _dt
-
-    upload.processed_at = _dt.datetime.now(_dt.timezone.utc)
+    upload.processed_at = dt.datetime.now(dt.timezone.utc)
 
     run_matching(db, branch_upload_id=upload.id, business_upload_id=None)
 
     db.commit()
     db.refresh(upload)
-    return upload
+    result = UploadSubmitResult.model_validate(upload)
+    result.rows_created = created
+    result.rows_updated = updated
+    result.rows_unchanged = unchanged
+    return result
 
 
-@router.post("/business-manager", response_model=UploadDetailOut)
+@router.post("/business-manager", response_model=UploadSubmitResult)
 async def upload_business_manager_file(
     file: UploadFile = File(...),
+    period_month: int = Form(...),
+    period_year: int = Form(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_business_manager),
 ):
+    """Org-wide payout report upload. Every row is upserted on
+    (client_disb_ext_account_no, loan_type, disbursement_date) - a
+    re-upload for a period already in progress updates existing rows.
+    Rows whose Disbursement date falls outside period_month/period_year
+    (or is missing/unparseable) are rejected, not silently accepted.
+    """
+    _validate_period(period_month, period_year)
+
     contents = await file.read()
     storage_path = save_upload_file(contents, file.filename, "business_manager")
 
@@ -131,68 +206,61 @@ async def upload_business_manager_file(
         upload_type=UploadType.BUSINESS_MANAGER,
         uploaded_by_user_id=current_user.id,
         branch_id=None,
+        period_month=period_month,
+        period_year=period_year,
         original_filename=file.filename,
         storage_path=storage_path,
         status=UploadStatus.PROCESSING,
     )
     db.add(upload)
     db.flush()
-    log_action(db, current_user.id, "UPLOAD_CREATED", "Upload", upload.id, upload_type="BUSINESS_MANAGER")
+    log_action(
+        db, current_user.id, "UPLOAD_CREATED", "Upload", upload.id,
+        upload_type="BUSINESS_MANAGER", period=f"{period_year}-{period_month:02d}",
+    )
 
     try:
-        parsed = parse_business_manager_file(storage_path)
+        parsed = parse_business_manager_file(storage_path, period_month, period_year)
     except ValueError as e:
         upload.status = UploadStatus.FAILED
         upload.failure_reason = str(e)
         db.commit()
         db.refresh(upload)
-        return upload
+        return UploadSubmitResult.model_validate(upload)
 
-    for row in parsed.rows:
-        db.add(
-            BusinessTransaction(
-                upload_id=upload.id,
-                row_number=row.row_number,
-                branch_name_raw=row.branch_raw,
-                employee_no=row.employee_no,
-                customer_no=row.customer_no,
-                account_no=row.account_no,
-                loan_type=row.loan_type,
-                disbursement_date=row.disbursement_date,
-                disbursement_amt=row.disbursement_amt,
-                payout_to_client=row.payout_to_client,
-                letshego_topup=row.letshego_topup,
-                appl_amount=row.appl_amount,
-                client_disb_ext_account_no=row.client_disb_ext_account_no,
-            )
-        )
+    created = updated = unchanged = 0
+    for parsed_row in parsed.rows:
+        _saved_row, outcome = upsert_business_transaction(db, upload.id, parsed_row, current_user.id)
+        if outcome.created:
+            created += 1
+        elif outcome.changed:
+            updated += 1
+        else:
+            unchanged += 1
     db.flush()
 
     for issue in parsed.issues:
-        db.add(
-            UploadError(
-                upload_id=upload.id,
-                row_number=issue.row_number,
-                severity=issue.severity,
-                column_name=issue.column_name,
-                message=issue.message,
-            )
-        )
+        db.add(UploadError(
+            upload_id=upload.id, row_number=issue.row_number, severity=issue.severity,
+            column_name=issue.column_name, message=issue.message,
+        ))
 
     upload.total_rows = parsed.total_data_rows_seen
-    upload.valid_rows = len(parsed.rows)
-    upload.error_rows = sum(1 for i in parsed.issues if i.severity == "ERROR")
+    upload.rows_accepted = created + updated + unchanged
+    upload.rows_rejected = sum(1 for i in parsed.issues if i.severity == "ERROR")
     upload.warning_rows = sum(1 for i in parsed.issues if i.severity == "WARNING")
     upload.status = UploadStatus.PROCESSED
-    import datetime as _dt
-
-    upload.processed_at = _dt.datetime.now(_dt.timezone.utc)
+    upload.processed_at = dt.datetime.now(dt.timezone.utc)
 
     run_matching(db, branch_upload_id=None, business_upload_id=upload.id)
 
     db.commit()
     db.refresh(upload)
-    return upload
+    result = UploadSubmitResult.model_validate(upload)
+    result.rows_created = created
+    result.rows_updated = updated
+    result.rows_unchanged = unchanged
+    return result
 
 
 @router.get("", response_model=list[UploadOut])

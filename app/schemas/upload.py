@@ -18,11 +18,13 @@ class UploadOut(BaseModel):
     id: int
     upload_type: UploadType
     branch_id: int | None
+    period_month: int | None
+    period_year: int | None
     original_filename: str
     status: UploadStatus
     total_rows: int
-    valid_rows: int
-    error_rows: int
+    rows_accepted: int
+    rows_rejected: int
     warning_rows: int
     failure_reason: str | None
     uploaded_at: dt.datetime
@@ -33,3 +35,14 @@ class UploadOut(BaseModel):
 
 class UploadDetailOut(UploadOut):
     errors: list[UploadErrorOut] = []
+
+
+class UploadSubmitResult(UploadDetailOut):
+    """Returned right after a submission - adds the created/updated
+    breakdown (not persisted columns; computed for this response only) so
+    the uploader can see at a glance how much of this upload was new data
+    vs corrections to rows from an earlier upload for the same period."""
+
+    rows_created: int = 0
+    rows_updated: int = 0
+    rows_unchanged: int = 0

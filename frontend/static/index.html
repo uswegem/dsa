@@ -40,14 +40,26 @@
         <div class="row">
           <div class="panel" id="panel-branch-upload">
             <h2>Upload Branch Manager File (roster)</h2>
-            <label>Branch (admin only)</label>
+            <small class="hint">Uploads are upserts: re-uploading for a period already in progress updates existing rows for that period, it never duplicates them. Rows whose DATE falls outside the period you select below are rejected and listed after submit.</small>
+            <label>Branch (admin only - leave blank if the sheet is named after the branch)</label>
             <select id="bm-branch-select"></select>
+            <label>Period</label>
+            <div style="display:flex; gap:8px;">
+              <select id="bm-period-month" style="flex:1"></select>
+              <select id="bm-period-year" style="flex:1"></select>
+            </div>
             <label>File (.xlsx)</label>
             <input id="bm-file" type="file" accept=".xlsx,.xls" />
             <div style="margin-top:12px;"><button id="bm-upload-btn">Upload</button></div>
           </div>
           <div class="panel" id="panel-business-upload">
             <h2>Upload Business Manager File (payout report)</h2>
+            <small class="hint">Uploads are upserts, same as the roster file. Rows whose Disbursement date falls outside the period you select below are rejected and listed after submit.</small>
+            <label>Period</label>
+            <div style="display:flex; gap:8px;">
+              <select id="bz-period-month" style="flex:1"></select>
+              <select id="bz-period-year" style="flex:1"></select>
+            </div>
             <label>File (.xlsx)</label>
             <input id="bz-file" type="file" accept=".xlsx,.xls" />
             <div style="margin-top:12px;"><button id="bz-upload-btn">Upload</button></div>
@@ -57,7 +69,7 @@
           <h2>Recent Uploads</h2>
           <button class="secondary" id="refresh-uploads">Refresh</button>
           <table id="uploads-table">
-            <thead><tr><th>ID</th><th>Type</th><th>Branch</th><th>Filename</th><th>Status</th><th>Rows</th><th>Errors</th><th>Warnings</th><th>Uploaded</th></tr></thead>
+            <thead><tr><th>ID</th><th>Type</th><th>Branch</th><th>Period</th><th>Filename</th><th>Status</th><th>Accepted</th><th>Rejected</th><th>Warnings</th><th>Uploaded</th></tr></thead>
             <tbody></tbody>
           </table>
           <div id="upload-detail"></div>

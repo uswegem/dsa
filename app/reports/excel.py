@@ -9,7 +9,14 @@ Four report types:
 
 Branch-scoped exports filter everything to one branch; org-wide exports
 (Business Manager) include all branches, with a Branch column for context.
+
+Every sheet starts with a 2-row banner: the period covered and the
+generation timestamp, then a status line - a period's data is "current, so
+far" until its run is finalized (REVIEWED/LOCKED/PAID), so a report
+generated against a DRAFT run is visibly marked as in-progress rather than
+implying it's complete.
 """
+import datetime as dt
 import io
 
 from openpyxl import Workbook
@@ -26,15 +33,50 @@ from app.models import (
     Dtl,
     MatchedTransaction,
 )
-from app.models.enums import MatchStatus, PayeeType
+from app.models.enums import MatchStatus, PayeeType, RunStatus
 
 HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 TOTAL_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
 TOTAL_FONT = Font(bold=True)
+IN_PROGRESS_FILL = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+FINALIZED_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+
+BANNER_ROWS = 3  # 1: period/generated-at, 2: status note, 3: blank spacer
+HEADER_ROW = BANNER_ROWS + 1
+DATA_START_ROW = HEADER_ROW + 1
+
+_FINALIZED_STATUSES = (RunStatus.LOCKED, RunStatus.PAID)
 
 
-def _write_header(ws, headers: list[str], row: int = 1) -> None:
+def _write_meta_banner(ws, num_cols: int, period: str, status: RunStatus | None) -> None:
+    generated_at = dt.datetime.now(dt.timezone.utc)
+    num_cols = max(num_cols, 1)
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
+    title_cell = ws.cell(row=1, column=1, value=f"Period: {period}    |    Generated: {generated_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    title_cell.font = Font(bold=True, size=11)
+
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=num_cols)
+    if status is None:
+        note = "Reflects data received to date across all uploads for this period - not tied to a specific commission run."
+        fill = IN_PROGRESS_FILL
+        font_color = "9C4500"
+    elif status in _FINALIZED_STATUSES:
+        note = f"Status: {status.value} — finalized."
+        fill = FINALIZED_FILL
+        font_color = "006100"
+    else:
+        note = f"Status: {status.value} — reflects data received so far. NOT finalized; numbers may still change as more uploads arrive."
+        fill = IN_PROGRESS_FILL
+        font_color = "9C4500"
+    note_cell = ws.cell(row=2, column=1, value=note)
+    note_cell.font = Font(bold=True, color=font_color)
+    for col in range(1, num_cols + 1):
+        ws.cell(row=2, column=col).fill = fill
+
+
+def _write_header(ws, headers: list[str], row: int = HEADER_ROW) -> None:
     for col, title in enumerate(headers, start=1):
         cell = ws.cell(row=row, column=col, value=title)
         cell.fill = HEADER_FILL
@@ -70,11 +112,12 @@ def _add_transaction_detail_sheet(wb: Workbook, db: Session, run: CommissionRun,
         "Client Account No", "Loan Type", "Disbursement Date", "Base Used",
         "Base Amount", "Payee", "Rate", "Commission Amount", "Match Status",
     ]
+    _write_meta_banner(ws, len(headers), run.period, run.status)
     _write_header(ws, headers)
 
     lines = _commission_lines_query(db, run, branch_id).order_by(CommissionLine.matched_transaction_id).all()
 
-    row_idx = 2
+    row_idx = DATA_START_ROW
     total = 0.0
     for line in lines:
         mt = line.matched_transaction
@@ -117,6 +160,7 @@ def _add_transaction_detail_sheet(wb: Workbook, db: Session, run: CommissionRun,
 def _add_dsa_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch_id: int | None) -> None:
     ws = wb.create_sheet("DSA Summary")
     headers = ["DSA Code", "DSA Name", "Branch", "NL Deals", "RF Deals", "Total Deals", "Total Commission"]
+    _write_meta_banner(ws, len(headers), run.period, run.status)
     _write_header(ws, headers)
 
     lines = (
@@ -135,7 +179,7 @@ def _add_dsa_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch
             agg["rf"] += 1
         agg["total_commission"] += float(line.commission_amount)
 
-    row_idx = 2
+    row_idx = DATA_START_ROW
     grand_total = 0.0
     for agg in sorted(by_dsa.values(), key=lambda a: a["dsa"].dsa_name):
         dsa = agg["dsa"]
@@ -159,6 +203,7 @@ def _add_dsa_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch
 def _add_dtl_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch_id: int | None) -> None:
     ws = wb.create_sheet("DTL Summary")
     headers = ["DTL Code", "DTL Name", "DSAs Supervised", "NL Deals", "RF Deals", "Total Deals", "Total Commission"]
+    _write_meta_banner(ws, len(headers), run.period, run.status)
     _write_header(ws, headers)
 
     lines = (
@@ -175,7 +220,7 @@ def _add_dtl_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch
             agg["rf"] += 1
         agg["total_commission"] += float(line.commission_amount)
 
-    row_idx = 2
+    row_idx = DATA_START_ROW
     grand_total = 0.0
     for agg in sorted(by_dtl.values(), key=lambda a: a["dtl"].dtl_name):
         dtl = agg["dtl"]
@@ -204,13 +249,17 @@ EXCEPTION_CATEGORY_LABELS = {
 }
 
 
-def add_exceptions_sheet(wb: Workbook, db: Session, period: str, branch_id: int | None, include_matched_with_warning: bool = True) -> None:
+def add_exceptions_sheet(
+    wb: Workbook, db: Session, period: str, branch_id: int | None,
+    include_matched_with_warning: bool = True, run: CommissionRun | None = None,
+) -> None:
     ws = wb.create_sheet("Exceptions")
     headers = [
         "Category", "Branch", "Client Name", "Client Account No (Branch)",
         "Client Account No (Business)", "DSA Code", "DSA Name", "Loan Type",
         "Disbursement Date", "Reported Amount", "Disbursement Amt", "Notes",
     ]
+    _write_meta_banner(ws, len(headers), period, run.status if run else None)
     _write_header(ws, headers)
 
     statuses = [MatchStatus.UNMATCHED_IN_BUSINESS_FILE, MatchStatus.UNMATCHED_IN_BRANCH_FILE, MatchStatus.DUPLICATE]
@@ -223,7 +272,7 @@ def add_exceptions_sheet(wb: Workbook, db: Session, period: str, branch_id: int 
     # via whichever side of the match is present.
     rows = q.all()
 
-    row_idx = 2
+    row_idx = DATA_START_ROW
     for mt in rows:
         bs = mt.branch_sale
         bt = mt.business_transaction
@@ -264,7 +313,7 @@ def generate_commission_report(db: Session, run: CommissionRun, branch_id: int |
     _add_transaction_detail_sheet(wb, db, run, branch_id)
     _add_dsa_summary_sheet(wb, db, run, branch_id)
     _add_dtl_summary_sheet(wb, db, run, branch_id)
-    add_exceptions_sheet(wb, db, run.period, branch_id)
+    add_exceptions_sheet(wb, db, run.period, branch_id, run=run)
 
     buf = io.BytesIO()
     wb.save(buf)

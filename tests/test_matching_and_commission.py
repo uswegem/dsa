@@ -49,19 +49,19 @@ def test_matching_classifies_all_four_statuses(db_session):
 
     # MATCHED
     db.add(BranchSale(
-        upload_id=branch_upload.id, branch_id=branch.id, row_number=2, loan_date=dt.date(2026, 8, 5),
+        upload_id=branch_upload.id, branch_id=branch.id, row_number=2, period_month=8, period_year=2026, loan_date=dt.date(2026, 8, 5),
         client_name="Client A", client_check_no="871", client_account_no="ACC001",
         dsa_code="DSA01", dsa_name="Amos", dtl_code="DTL01", dtl_name="Grace T",
     ))
     # MATCHED_WITH_WARNING (secondary check mismatches)
     db.add(BranchSale(
-        upload_id=branch_upload.id, branch_id=branch.id, row_number=3, loan_date=dt.date(2026, 8, 6),
+        upload_id=branch_upload.id, branch_id=branch.id, row_number=3, period_month=8, period_year=2026, loan_date=dt.date(2026, 8, 6),
         client_name="Client B", client_check_no="872", client_account_no="ACC002",
         dsa_code="DSA01", dsa_name="Amos", dtl_code="DTL01", dtl_name="Grace T",
     ))
     # UNMATCHED_IN_BUSINESS_FILE (no business row for ACC003)
     db.add(BranchSale(
-        upload_id=branch_upload.id, branch_id=branch.id, row_number=4, loan_date=dt.date(2026, 8, 7),
+        upload_id=branch_upload.id, branch_id=branch.id, row_number=4, period_month=8, period_year=2026, loan_date=dt.date(2026, 8, 7),
         client_name="Client C", client_check_no="873", client_account_no="ACC003",
         dsa_code="DSA01", dsa_name="Amos", dtl_code="DTL01", dtl_name="Grace T",
     ))
@@ -108,7 +108,7 @@ def test_unmatched_rows_are_re_resolved_when_the_other_file_arrives_later(db_ses
     branch, dsa, dtl, admin, branch_upload, biz_upload = _seed_base(db)
 
     db.add(BranchSale(
-        upload_id=branch_upload.id, branch_id=branch.id, row_number=2, loan_date=dt.date(2026, 8, 5),
+        upload_id=branch_upload.id, branch_id=branch.id, row_number=2, period_month=8, period_year=2026, loan_date=dt.date(2026, 8, 5),
         client_name="Client A", client_check_no="871", client_account_no="ACC001",
         dsa_code="DSA01", dsa_name="Amos", dtl_code="DTL01", dtl_name="Grace T",
     ))
@@ -140,12 +140,12 @@ def test_commission_calculation_rates_and_exclusions(db_session):
     branch, dsa, dtl, admin, branch_upload, biz_upload = _seed_base(db)
 
     db.add(BranchSale(
-        upload_id=branch_upload.id, branch_id=branch.id, row_number=2, loan_date=dt.date(2026, 8, 5),
+        upload_id=branch_upload.id, branch_id=branch.id, row_number=2, period_month=8, period_year=2026, loan_date=dt.date(2026, 8, 5),
         client_name="Client A", client_check_no="871", client_account_no="ACC001",
         dsa_code="DSA01", dsa_name="Amos", dtl_code="DTL01", dtl_name="Grace T",
     ))
     db.add(BranchSale(
-        upload_id=branch_upload.id, branch_id=branch.id, row_number=3, loan_date=dt.date(2026, 8, 6),
+        upload_id=branch_upload.id, branch_id=branch.id, row_number=3, period_month=8, period_year=2026, loan_date=dt.date(2026, 8, 6),
         client_name="Client B", client_check_no="872", client_account_no="ACC002",
         dsa_code="DSA01", dsa_name="Amos", dtl_code="DTL01", dtl_name="Grace T",
     ))

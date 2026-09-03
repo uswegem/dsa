@@ -1,6 +1,6 @@
 import datetime as dt
 
-from sqlalchemy import String, Integer, Date, DateTime, Numeric, ForeignKey, Enum as SAEnum, Text, func
+from sqlalchemy import String, Integer, Date, DateTime, Numeric, ForeignKey, Enum as SAEnum, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -8,19 +8,34 @@ from app.models.enums import MatchStatus, LoanType
 
 
 class BranchSale(Base):
-    """One raw parsed row from a Branch Manager (roster/attribution) upload.
+    """One row of Branch Manager (roster/attribution) data, upserted from
+    possibly many uploads across a period.
 
     This is the ONLY source of DSA/DTL identity in the system.
+
+    Natural key: (client_account_no, period_month, period_year). Branch
+    Managers upload repeatedly through the month; a later upload for the
+    same period whose CLIENT_ACCOUNT_NO already exists updates this row
+    in place (see app/services/upsert.py) rather than creating a duplicate
+    that would double-count commission.
     """
 
     __tablename__ = "branch_sales"
+    __table_args__ = (
+        UniqueConstraint("client_account_no", "period_month", "period_year", name="uq_branch_sales_natural_key"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    upload_id: Mapped[int] = mapped_column(ForeignKey("uploads.id"), nullable=False)
+    upload_id: Mapped[int] = mapped_column(ForeignKey("uploads.id"), nullable=False)  # most recent upload that wrote this row
     branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id"), nullable=False)
-    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)  # row number within that upload
 
-    loan_date: Mapped[dt.date | None] = mapped_column(Date)  # DATE column - informational only, never used for bucketing
+    # The period this row was submitted for (selected by the uploader, not
+    # derived from loan_date) - part of the natural key above.
+    period_month: Mapped[int] = mapped_column(Integer, nullable=False)
+    period_year: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    loan_date: Mapped[dt.date | None] = mapped_column(Date)  # DATE column - validated against period_month/year on ingest; never used for commission bucketing
     client_name: Mapped[str] = mapped_column(String(255), nullable=False)
     client_check_no: Mapped[str] = mapped_column(String(100), nullable=False)  # always text: mixes numeric/alphanumeric
     client_account_no: Mapped[str] = mapped_column(String(100), nullable=False, index=True)  # primary join key
@@ -28,33 +43,42 @@ class BranchSale(Base):
 
     reported_amount: Mapped[float | None] = mapped_column(Numeric(18, 2))  # reconciliation only, never a commission base
 
-    branch_name_raw: Mapped[str | None] = mapped_column(String(255))  # BRANCH column as typed in the file
+    branch_name_raw: Mapped[str | None] = mapped_column(String(255))  # BRANCH column / sheet name as typed in the file
     dsa_code: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     dsa_account_no: Mapped[str | None] = mapped_column(String(100))
     dsa_name: Mapped[str] = mapped_column(String(255), nullable=False)
     dtl_name: Mapped[str | None] = mapped_column(String(255))
     dtl_code: Mapped[str | None] = mapped_column(String(100))
 
-    date_out_of_period_warning: Mapped[bool] = mapped_column(default=False)
-
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     matches: Mapped[list["MatchedTransaction"]] = relationship(back_populates="branch_sale")
     branch = relationship("Branch")
 
 
 class BusinessTransaction(Base):
-    """One raw parsed row from a Business Manager ("Payout Report by Branch") upload.
+    """One row of Business Manager ("Payout Report by Branch") data, upserted
+    from possibly many uploads across a period.
 
     Source of loan type and financial amounts. No reliable DSA/DTL
     attribution - CONSULTANT / CIF_REL_MANAGER are deliberately not stored
     for attribution purposes.
+
+    Natural key: (client_disb_ext_account_no, loan_type, disbursement_date).
+    A later upload whose row matches an existing key updates it in place
+    (see app/services/upsert.py) rather than creating a duplicate.
     """
 
     __tablename__ = "business_transactions"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_disb_ext_account_no", "loan_type", "disbursement_date", name="uq_business_transactions_natural_key"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    upload_id: Mapped[int] = mapped_column(ForeignKey("uploads.id"), nullable=False)
+    upload_id: Mapped[int] = mapped_column(ForeignKey("uploads.id"), nullable=False)  # most recent upload that wrote this row
     row_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
     branch_name_raw: Mapped[str | None] = mapped_column(String(255))
@@ -73,6 +97,7 @@ class BusinessTransaction(Base):
     client_disb_ext_account_no: Mapped[str] = mapped_column(String(100), nullable=False, index=True)  # primary join key
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     matches: Mapped[list["MatchedTransaction"]] = relationship(back_populates="business_transaction")
 

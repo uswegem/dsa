@@ -28,13 +28,14 @@ app/
   core/       config, db session, JWT auth, role dependencies
   models/     SQLAlchemy models (see "Data model" below)
   schemas/    Pydantic request/response models
-  services/   ingestion, matching, commission engine, roster sync, audit
+  services/   ingestion, upsert, matching, commission engine, roster sync, audit
   reports/    openpyxl Excel report generation
   api/        FastAPI routers
-frontend/static/   minimal JS/HTML UI
-migrations/         Alembic
-scripts/seed.py     creates the first ADMIN user
-tests/               pytest - ingestion quirks, matching, commission math
+frontend/static/           minimal JS/HTML UI
+migrations/                 Alembic
+scripts/seed.py             creates the first ADMIN user
+scripts/seed_dsa_dtl_roster.py  one-time load of a supplied DSA/DTL reference list
+tests/                       pytest - ingestion quirks, upserts, matching, commission math
 ```
 
 ## Setup
@@ -100,6 +101,40 @@ place - `Settings.net_topup_basis_field` (see its docstring) and
 without touching any other calculation logic. If Finance defines "net"
 differently, change only that one function/setting.
 
+## Incremental uploads & period selection
+
+Branch Managers (and the Business Manager) don't upload one final file at
+month-end - they upload repeatedly through the month as sales happen. Every
+upload requires an explicit **period** (month + year, picked in the UI) and
+is an **upsert**, not a blind insert:
+
+- `branch_sales` natural key: `(client_account_no, period_month, period_year)`
+- `business_transactions` natural key: `(client_disb_ext_account_no, loan_type, disbursement_date)`
+
+A row whose natural key already exists for that period **updates** the
+existing row (and logs the diff to `audit_log` via `app/services/upsert.py`)
+instead of inserting a duplicate that would double-count commission. A
+different period is a genuinely different row (period is part of the key).
+
+**Date validation is hard, per upload:** every row's own date (`DATE` for
+Branch Manager, `Disbursement date` for Business Manager) is checked against
+the period selected for *that* upload. Outside the period, missing, or
+unparseable -> the row is a validation **error**, excluded from ingestion,
+and listed in the response/`upload_errors` (never silently accepted or
+defaulted) - see `app/services/ingest_branch_manager.py` /
+`ingest_business_manager.py`.
+
+**Multi-sheet Branch Manager workbooks** (one sheet per branch, sheet name =
+branch name) are supported alongside the normal single-sheet upload - see
+`parse_branch_manager_file`. A Branch Manager's own upload only ever
+processes the sheet matching their branch (others are rejected, not
+silently dropped); an Admin's multi-sheet upload resolves each sheet's
+branch by name, for bulk/migration loads.
+
+A period's data is always "current, so far" - there is no "final file";
+reports generated before a run is `LOCKED`/`PAID` say so visibly (see
+Reports below).
+
 ## Matching / reconciliation
 
 - Primary key: `BranchSale.client_account_no == BusinessTransaction.client_disb_ext_account_no`
@@ -111,9 +146,16 @@ differently, change only that one function/setting.
   Everything else surfaces in the Exceptions view/report and **does not
   block** any other part of the pipeline, but must be visible before a run
   is locked (see `app/api/reports.py` exceptions endpoint / Exceptions tab).
-- Matching re-runs safely after every new upload (`run_matching` only
-  touches rows not already attached to a `MatchedTransaction`), since the
-  two files land independently and out of order.
+- Matching re-runs (and incrementally extends) after every upload -
+  `UNMATCHED_*` is never treated as a permanent classification: a branch
+  sale uploaded on day 3 with no business-file match yet will pick one up
+  automatically once the business file lands on day 10 (`run_matching`
+  only leaves `MATCHED` / `MATCHED_WITH_WARNING` / `DUPLICATE` rows alone;
+  everything else is recomputed from scratch on every run). An upsert-driven
+  correction to an already-matched row (e.g. a DSA reassignment) doesn't
+  need a re-match either - commission calculation reads the live row at
+  calculation time, so the correction is picked up on the run's next
+  (DRAFT-only) recalculation.
 
 ## Commission run lifecycle
 
@@ -133,6 +175,13 @@ differently, change only that one function/setting.
   Branch-scoped runs remain available (e.g. for a branch manager's early
   look at their own numbers) and are protected from double-paying by the
   same-transaction guard above.
+
+## Reports
+
+Every sheet of every Excel export (`app/reports/excel.py`) opens with a
+2-row banner: the period covered, the generation timestamp, and a status
+line - orange/"NOT finalized" for a `DRAFT` (or standalone, run-less)
+export, green/"finalized" once the run is `LOCKED` or `PAID`.
 
 ## Roles
 
@@ -162,7 +211,11 @@ venv/Scripts/python.exe -m pytest -q
 ```
 
 Covers: header-whitespace tolerance, trailing-blank-row filtering,
-text-not-numeric CLIENT_CHECK_NO, stray-date warnings, Business Manager
-header-row detection past the metadata block, LOANTYPE prefix parsing,
-whitespace stripping, all five match classifications, commission rate math,
-and the locked-run-cannot-recalculate guard.
+text-not-numeric CLIENT_CHECK_NO, out-of-period/missing-date rejection,
+multi-sheet workbooks, Business Manager header-row detection past the
+metadata block, LOANTYPE prefix parsing, whitespace stripping, upsert-not-
+duplicate on re-upload (including the different-period-is-a-different-row
+case), all five match classifications, `UNMATCHED_*` being re-resolved when
+the other file arrives later, the DTL `PENDING-` code reconciliation
+(including the same-name-different-branch non-collision case), commission
+rate math, and the locked-run-cannot-recalculate guard.

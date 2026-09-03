@@ -70,15 +70,31 @@ async function loadBranches() {
   }
 }
 
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+function populatePeriodSelects(monthSelId, yearSelId) {
+  const monthSel = document.getElementById(monthSelId);
+  const yearSel = document.getElementById(yearSelId);
+  const now = new Date();
+  monthSel.innerHTML = MONTH_NAMES.map((name, i) => `<option value="${i + 1}">${name}</option>`).join("");
+  monthSel.value = now.getMonth() + 1;
+  const years = [];
+  for (let y = now.getFullYear() - 1; y <= now.getFullYear() + 1; y++) years.push(y);
+  yearSel.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join("");
+  yearSel.value = now.getFullYear();
+}
+
 // ---- Uploads ----
 async function refreshUploads() {
   const uploads = await api("/api/uploads");
   const tbody = document.querySelector("#uploads-table tbody");
   tbody.innerHTML = uploads.map(u => `
     <tr data-id="${u.id}" class="upload-row" style="cursor:pointer">
-      <td>${u.id}</td><td>${u.upload_type}</td><td>${u.branch_id ?? "-"}</td><td>${u.original_filename}</td>
+      <td>${u.id}</td><td>${u.upload_type}</td><td>${u.branch_id ?? "-"}</td>
+      <td>${u.period_year ? `${MONTH_NAMES[u.period_month - 1].slice(0,3)} ${u.period_year}` : "-"}</td>
+      <td>${u.original_filename}</td>
       <td><span class="status-pill status-${u.status}">${u.status}</span></td>
-      <td>${u.valid_rows}/${u.total_rows}</td><td>${u.error_rows}</td><td>${u.warning_rows}</td>
+      <td>${u.rows_accepted}/${u.total_rows}</td><td>${u.rows_rejected}</td><td>${u.warning_rows}</td>
       <td>${new Date(u.uploaded_at).toLocaleString()}</td>
     </tr>`).join("");
   tbody.querySelectorAll(".upload-row").forEach(row => {
@@ -94,8 +110,14 @@ async function showUploadDetail(id) {
     return;
   }
   el.innerHTML = `<p><b>Upload #${u.id} issues</b> (${u.errors.length}):</p><table><thead><tr><th>Row</th><th>Severity</th><th>Column</th><th>Message</th></tr></thead><tbody>` +
-    u.errors.map(e => `<tr><td>${e.row_number}</td><td class="severity-${e.severity}">${e.severity}</td><td>${e.column_name ?? ""}</td><td>${e.message}</td></tr>`).join("") +
+    u.errors.map(e => `<tr><td>${e.row_number || "(file/sheet)"}</td><td class="severity-${e.severity}">${e.severity}</td><td>${e.column_name ?? ""}</td><td>${e.message}</td></tr>`).join("") +
     `</tbody></table>`;
+}
+
+function submitSummary(u) {
+  const parts = [`${u.rows_accepted} accepted (${u.rows_created} new, ${u.rows_updated} updated${u.rows_unchanged ? `, ${u.rows_unchanged} unchanged` : ""})`, `${u.rows_rejected} rejected`];
+  if (u.warning_rows) parts.push(`${u.warning_rows} warning(s)`);
+  return `Upload #${u.id}: ${u.status} - ${parts.join(", ")}`;
 }
 
 async function uploadBranchManagerFile() {
@@ -103,13 +125,15 @@ async function uploadBranchManagerFile() {
   if (!fileInput.files.length) return flash("Choose a file first", "err");
   const fd = new FormData();
   fd.append("file", fileInput.files[0]);
+  fd.append("period_month", document.getElementById("bm-period-month").value);
+  fd.append("period_year", document.getElementById("bm-period-year").value);
   const branchId = document.getElementById("bm-branch-select").value;
   if (branchId) fd.append("branch_id", branchId);
   try {
     const u = await api("/api/uploads/branch-manager", { method: "POST", body: fd });
-    flash(`Upload #${u.id}: ${u.status} - ${u.valid_rows} rows ingested, ${u.error_rows} errors, ${u.warning_rows} warnings`,
-      u.status === "FAILED" ? "err" : "ok");
+    flash(submitSummary(u), u.status === "FAILED" || u.rows_rejected > 0 ? "err" : "ok");
     await refreshUploads();
+    showUploadDetail(u.id);
   } catch (e) { flash(e.message, "err"); }
 }
 
@@ -118,11 +142,13 @@ async function uploadBusinessManagerFile() {
   if (!fileInput.files.length) return flash("Choose a file first", "err");
   const fd = new FormData();
   fd.append("file", fileInput.files[0]);
+  fd.append("period_month", document.getElementById("bz-period-month").value);
+  fd.append("period_year", document.getElementById("bz-period-year").value);
   try {
     const u = await api("/api/uploads/business-manager", { method: "POST", body: fd });
-    flash(`Upload #${u.id}: ${u.status} - ${u.valid_rows} rows ingested, ${u.error_rows} errors, ${u.warning_rows} warnings`,
-      u.status === "FAILED" ? "err" : "ok");
+    flash(submitSummary(u), u.status === "FAILED" || u.rows_rejected > 0 ? "err" : "ok");
     await refreshUploads();
+    showUploadDetail(u.id);
   } catch (e) { flash(e.message, "err"); }
 }
 
@@ -276,6 +302,9 @@ document.getElementById("exc-download-btn").onclick = downloadExceptions;
 document.getElementById("admin-create-branch").onclick = createBranch;
 document.getElementById("admin-create-dtl").onclick = createDtl;
 document.getElementById("admin-create-user").onclick = createUser;
+
+populatePeriodSelects("bm-period-month", "bm-period-year");
+populatePeriodSelects("bz-period-month", "bz-period-year");
 
 const saved = localStorage.getItem("dsa_token");
 if (saved) { state.token = saved; afterLogin().catch(() => logout()); }

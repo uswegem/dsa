@@ -1,7 +1,12 @@
 """
 Ingestion of the Business Manager upload ("Payout Report by Branch" system export).
 
-Defends against the known real-world quirks:
+Every upload is tagged with an explicit period (month/year) chosen by the
+uploader. Disbursement date is validated against that selected period per
+row - a row whose date falls outside it, or is missing/unparseable, is a
+validation ERROR and is excluded from ingestion.
+
+Defends against the other known real-world quirks:
   - 4 rows of report metadata before the real header row -> detect it
   - LOANTYPE values are 'NL : New' / 'RF : Topup' -> match by prefix
   - string fields padded with trailing whitespace -> strip on ingestion
@@ -137,7 +142,7 @@ def _resolve_columns(header_row: list) -> dict[str, int]:
     return resolved
 
 
-def parse_business_manager_file(file_path: str) -> BusinessManagerIngestResult:
+def parse_business_manager_file(file_path: str, period_month: int, period_year: int) -> BusinessManagerIngestResult:
     raw = pd.read_excel(file_path, header=None, dtype=object)
     header_idx = _find_header_row(raw)
 
@@ -178,6 +183,15 @@ def parse_business_manager_file(file_path: str) -> BusinessManagerIngestResult:
             )
         if disbursement_date is None:
             row_errors.append(IngestIssue(row_number, "ERROR", "Disbursement date is blank or unparseable", "Disbursement date"))
+        elif (disbursement_date.year, disbursement_date.month) != (period_year, period_month):
+            row_errors.append(
+                IngestIssue(
+                    row_number, "ERROR",
+                    f"Disbursement date {disbursement_date.isoformat()} falls outside the selected period "
+                    f"{period_year}-{period_month:02d} - row excluded. Re-submit it in an upload for the correct period.",
+                    "Disbursement date",
+                )
+            )
 
         if row_errors:
             result.issues.extend(row_errors)
