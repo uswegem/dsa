@@ -4,9 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_admin, require_any, require_business_manager, require_branch_manager
+from app.core.deps import require_permission
 from app.models import CommissionAdjustment, CommissionRun, MatchedTransaction, User
-from app.models.enums import MatchStatus, RunStatus, RunType, UserRole
+from app.models.enums import MatchStatus, RunStatus, RunType
 from app.schemas.commission import AdjustmentCreate, CommissionRunCreate, CommissionRunOut
 from app.services.audit import log_action
 from app.services.commission import (
@@ -22,21 +22,21 @@ router = APIRouter(prefix="/api/commission", tags=["commission"])
 
 def _scope_runs_query(db: Session, current_user: User):
     q = db.query(CommissionRun)
-    if current_user.role == UserRole.BRANCH_MANAGER:
+    if current_user.branch_id is not None:
         q = q.filter(CommissionRun.branch_id == current_user.branch_id)
     return q
 
 
 def _check_run_access(run: CommissionRun, current_user: User) -> None:
-    if current_user.role == UserRole.BRANCH_MANAGER and run.branch_id != current_user.branch_id:
+    if current_user.branch_id is not None and run.branch_id != current_user.branch_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not permitted for this branch's runs")
 
 
 @router.post("/runs", response_model=CommissionRunOut)
-def create_run(payload: CommissionRunCreate, db: Session = Depends(get_db), current_user: User = Depends(require_any)):
-    if current_user.role == UserRole.BRANCH_MANAGER:
+def create_run(payload: CommissionRunCreate, db: Session = Depends(get_db), current_user: User = Depends(require_permission("OPERATE_COMMISSION_RUNS"))):
+    if current_user.branch_id is not None:
         if payload.run_type != RunType.BRANCH or payload.branch_id != current_user.branch_id:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Branch managers may only create BRANCH runs for their own branch")
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Branch-scoped users may only create BRANCH runs for their own branch")
     if payload.run_type == RunType.BRANCH and payload.branch_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "branch_id is required for a BRANCH run")
 
@@ -71,12 +71,12 @@ def create_run(payload: CommissionRunCreate, db: Session = Depends(get_db), curr
 
 
 @router.get("/runs", response_model=list[CommissionRunOut])
-def list_runs(db: Session = Depends(get_db), current_user: User = Depends(require_any)):
+def list_runs(db: Session = Depends(get_db), current_user: User = Depends(require_permission("OPERATE_COMMISSION_RUNS"))):
     return _scope_runs_query(db, current_user).order_by(CommissionRun.created_at.desc()).all()
 
 
 @router.get("/runs/{run_id}", response_model=CommissionRunOut)
-def get_run(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_any)):
+def get_run(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_permission("OPERATE_COMMISSION_RUNS"))):
     run = db.get(CommissionRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
@@ -85,7 +85,7 @@ def get_run(run_id: int, db: Session = Depends(get_db), current_user: User = Dep
 
 
 @router.post("/runs/{run_id}/calculate", response_model=CommissionRunOut)
-def calculate_run(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_any)):
+def calculate_run(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_permission("OPERATE_COMMISSION_RUNS"))):
     run = db.get(CommissionRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
@@ -105,7 +105,7 @@ def calculate_run(run_id: int, db: Session = Depends(get_db), current_user: User
 
 
 @router.post("/runs/{run_id}/review", response_model=CommissionRunOut)
-def review(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+def review(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_permission("REVIEW_COMMISSION_RUN"))):
     run = db.get(CommissionRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
@@ -120,7 +120,7 @@ def review(run_id: int, db: Session = Depends(get_db), current_user: User = Depe
 
 
 @router.post("/runs/{run_id}/lock", response_model=CommissionRunOut)
-def lock(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+def lock(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_permission("LOCK_COMMISSION_RUN"))):
     run = db.get(CommissionRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
@@ -150,7 +150,7 @@ def lock(run_id: int, db: Session = Depends(get_db), current_user: User = Depend
 
 
 @router.post("/runs/{run_id}/mark-paid", response_model=CommissionRunOut)
-def mark_run_paid(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+def mark_run_paid(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_permission("MARK_RUN_PAID"))):
     run = db.get(CommissionRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
@@ -165,7 +165,7 @@ def mark_run_paid(run_id: int, db: Session = Depends(get_db), current_user: User
 
 
 @router.post("/adjustments", status_code=status.HTTP_201_CREATED)
-def create_adjustment(payload: AdjustmentCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+def create_adjustment(payload: AdjustmentCreate, db: Session = Depends(get_db), current_user: User = Depends(require_permission("MANAGE_ADJUSTMENTS"))):
     run = db.get(CommissionRun, payload.commission_run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Target run not found")

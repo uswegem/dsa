@@ -25,12 +25,13 @@ which now hosts a dedicated `dsa` database and a scoped `dsa_app` login role
 
 ```
 app/
-  core/       config, db session, JWT auth, role dependencies
-  models/     SQLAlchemy models (see "Data model" below)
+  core/       config, db session, JWT auth, permission dependencies
+  models/     SQLAlchemy models (see "Data model" below), rbac.py = roles/permissions
   schemas/    Pydantic request/response models
-  services/   ingestion, upsert, matching, commission engine, roster sync, audit
+  services/   ingestion, upsert, matching, commission engine, roster sync, audit, permissions
   reports/    openpyxl Excel report generation
   api/        FastAPI routers
+  api/admin/  users.py, roles.py, branches.py, dsas.py, dtls.py - mirrors the Admin sub-nav 1:1
 frontend/static/           minimal JS/HTML UI
 migrations/                 Alembic
 scripts/seed.py             creates the first ADMIN user
@@ -183,14 +184,67 @@ Every sheet of every Excel export (`app/reports/excel.py`) opens with a
 line - orange/"NOT finalized" for a `DRAFT` (or standalone, run-less)
 export, green/"finalized" once the run is `LOCKED` or `PAID`.
 
-## Roles
+## Roles & permissions (RBAC)
 
-- `BRANCH_MANAGER`: upload their branch's roster; download their branch's
-  sales/commission reports. Scoped to `user.branch_id` everywhere.
-- `BUSINESS_MANAGER`: upload the org-wide payout file; view/download
-  consolidated and per-branch commission reports.
-- `ADMIN`: manage users/branches/DTL codes; review and lock commission runs;
-  view exceptions across all branches.
+Roles are no longer a fixed enum - `roles` / `permissions` / `role_permissions`
+(`app/models/rbac.py`) replace it, managed via the Admin → Roles UI
+(`MANAGE_ROLES`). Every endpoint is gated by a single reusable FastAPI
+dependency, `require_permission(key)` / `require_any_permission(*keys)`
+(`app/core/deps.py`) - no endpoint compares role name strings directly.
+`app/services/permissions.py` is the canonical, editable-going-forward
+permission catalog (19 permissions) and the starter grants for the three
+seeded roles; the RBAC migration keeps its own frozen literal copy of that
+same data (migrations must never re-import a live module that can change
+later).
+
+**What vs. where**: a role's permissions decide what a user can do;
+`users.branch_id` (unchanged) decides which branch's data they can do it
+to - a user has no branch (org-wide) or exactly one. Concretely: branch
+scoping throughout the API keys off `current_user.branch_id is not None`
+(forced to their own branch) vs. holding the matching `VIEW_ALL_*` /
+`UPLOAD_*` permission (unrestricted) - see `_scope_uploads_query`,
+`_scope_runs_query`, `_resolve_branch_scope` etc. in the relevant `app/api/*.py`.
+
+Seeded system roles (`is_system_role=True` - permissions editable, role
+itself never deletable):
+
+| Role | Permissions |
+|---|---|
+| `ADMIN` | all 19 |
+| `BRANCH_MANAGER` | `UPLOAD_BRANCH_FILE`, `VIEW_OWN_BRANCH_REPORTS`, `VIEW_OWN_BRANCH_EXCEPTIONS`, `VIEW_OWN_BRANCH_UPLOADS`, `OPERATE_COMMISSION_RUNS` |
+| `BUSINESS_MANAGER` | `UPLOAD_BUSINESS_FILE`, `VIEW_ALL_REPORTS`, `VIEW_ALL_EXCEPTIONS`, `VIEW_ALL_UPLOADS`, `OPERATE_COMMISSION_RUNS`, `TRIGGER_MATCHING` |
+
+Run-lifecycle actions (Review/Lock/Mark Paid/Adjustments) each have their
+own permission (`REVIEW_COMMISSION_RUN`, `LOCK_COMMISSION_RUN`,
+`MARK_RUN_PAID`, `MANAGE_ADJUSTMENTS`) rather than being bundled - all
+admin-only in the starter grant, but a custom role could split them apart
+(e.g. a reviewer who can't lock). Creating/viewing/(re)calculating a DRAFT
+run (`OPERATE_COMMISSION_RUNS`) and viewing uploads (`VIEW_ALL_UPLOADS` /
+`VIEW_OWN_BRANCH_UPLOADS`) are new permissions with no explicit spec
+mapping - confirmed with the business owner before building; see git log
+for that exchange.
+
+**Lockout guard**: no role edit or delete may leave zero *active* users
+holding `MANAGE_ROLES` system-wide - `_would_lose_all_manage_roles_access()`
+in `app/api/admin/roles.py` (tested in `tests/test_rbac.py`, including the
+inactive-user edge case). System roles can't be deleted at all
+(`is_system_role`), and a role with users still assigned can't be deleted
+either (409, reassign first).
+
+**Admin UI**: the Admin tab is now a sub-nav (`app/api/admin/` package
+mirrors it 1:1: `users.py` / `roles.py` / `branches.py` / `dsas.py` /
+`dtls.py`) - Users, Roles, Branches, DSAs, DTLs. Each sub-nav item's
+visibility is gated client-side by the matching `MANAGE_*` permission
+(`GET /api/auth/me` now returns the caller's effective `permissions: []`
+for exactly this). DSAs is new: an admin can onboard one directly (before
+their first sale) and edit their branch/DTL - a DTL reassignment here goes
+through the same `sync_assignment()` effective-dated mechanism an upload
+uses, not a raw overwrite. While building that, found and fixed a real bug
+in `sync_assignment()`: two reassignments on the same calendar day (e.g. an
+admin correcting a DSA right after creating them) silently no-op'd against
+a `<=` guard that was only meant to reject stale, late-arriving *upload*
+data - same-day corrections now update the still-open assignment in place
+instead (see `tests/test_roster_sync.py`).
 
 ## Known assumption worth flagging
 
@@ -217,5 +271,14 @@ metadata block, LOANTYPE prefix parsing, whitespace stripping, upsert-not-
 duplicate on re-upload (including the different-period-is-a-different-row
 case), all five match classifications, `UNMATCHED_*` being re-resolved when
 the other file arrives later, the DTL `PENDING-` code reconciliation
-(including the same-name-different-branch non-collision case), commission
-rate math, and the locked-run-cannot-recalculate guard.
+(including the same-name-different-branch non-collision case), same-day
+vs. next-day DTL reassignment history, commission rate math, the
+locked-run-cannot-recalculate guard, permission checks
+(`test_rbac.py::test_user_has_permission_reflects_role_grants`), and the
+MANAGE_ROLES lockout guard including the inactive-user edge case
+(`test_rbac.py::test_lockout_guard_*`).
+
+`tests/conftest.py` seeds the same role/permission catalog into the
+in-memory test DB that the RBAC migration seeds in production (reusing
+`app.services.permissions`, not the migration's frozen copy - tests should
+track current app behavior).

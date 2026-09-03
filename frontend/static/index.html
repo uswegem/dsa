@@ -127,46 +127,113 @@
       </section>
 
       <section id="tab-admin" class="tab hidden">
-        <div class="row">
-          <div class="panel">
-            <h2>New Branch</h2>
+        <nav id="admin-subnav">
+          <button data-admin-section="users" data-perm="MANAGE_USERS" class="active">Users</button>
+          <button data-admin-section="roles" data-perm="MANAGE_ROLES">Roles</button>
+          <button data-admin-section="branches" data-perm="MANAGE_BRANCHES">Branches</button>
+          <button data-admin-section="dsas" data-perm="MANAGE_DSAS">DSAs</button>
+          <button data-admin-section="dtls" data-perm="MANAGE_DTLS">DTLs</button>
+        </nav>
+
+        <section id="admin-section-users" class="admin-section panel">
+          <div class="panel-header-row">
+            <h2>Users</h2>
+            <button class="secondary" id="toggle-user-form">+ New User</button>
+          </div>
+          <div id="user-form" class="collapsible hidden">
+            <div class="row">
+              <div>
+                <label>Email</label><input id="user-form-email" type="email" />
+                <label>Full name</label><input id="user-form-name" />
+                <label>Password</label><input id="user-form-password" type="password" />
+                <label>Role</label>
+                <select id="user-form-role"></select>
+                <label>Branch (for branch-scoped roles)</label>
+                <select id="user-form-branch"></select>
+                <div style="margin-top:12px;">
+                  <button id="user-form-save">Create User</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <table id="admin-users-table"><thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Branch</th></tr></thead><tbody></tbody></table>
+        </section>
+
+        <section id="admin-section-roles" class="admin-section panel hidden">
+          <div class="panel-header-row">
+            <h2>Roles</h2>
+            <button class="secondary" id="toggle-role-form">+ New Role</button>
+          </div>
+          <div id="role-form" class="collapsible hidden">
+            <input type="hidden" id="role-form-id" />
+            <label>Name</label><input id="role-form-name" />
+            <label>Description</label><input id="role-form-description" />
+            <label>Permissions</label>
+            <div id="role-form-permissions" class="checkbox-grid"></div>
+            <div style="margin-top:12px;">
+              <button id="role-form-save">Save Role</button>
+              <button class="secondary" id="role-form-cancel">Cancel</button>
+            </div>
+          </div>
+          <table id="admin-roles-table">
+            <thead><tr><th>Name</th><th>Description</th><th>Permissions</th><th>System?</th><th>Actions</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section id="admin-section-branches" class="admin-section panel hidden">
+          <div class="panel-header-row">
+            <h2>Branches</h2>
+            <button class="secondary" id="toggle-branch-form">+ New Branch</button>
+          </div>
+          <div id="branch-form" class="collapsible hidden">
             <label>Name</label><input id="admin-branch-name" />
             <label>Code</label><input id="admin-branch-code" />
             <div style="margin-top:12px;"><button id="admin-create-branch">Create</button></div>
           </div>
-          <div class="panel">
-            <h2>New DTL</h2>
-            <label>DTL Code</label><input id="admin-dtl-code" />
-            <label>DTL Name</label><input id="admin-dtl-name" />
-            <div style="margin-top:12px;"><button id="admin-create-dtl">Create</button></div>
-          </div>
-        </div>
-        <section class="panel">
-          <h2>New User</h2>
-          <div class="row">
-            <div>
-              <label>Email</label><input id="admin-user-email" type="email" />
-              <label>Full name</label><input id="admin-user-name" />
-              <label>Password</label><input id="admin-user-password" type="password" />
-              <label>Role</label>
-              <select id="admin-user-role">
-                <option value="BRANCH_MANAGER">BRANCH_MANAGER</option>
-                <option value="BUSINESS_MANAGER">BUSINESS_MANAGER</option>
-                <option value="ADMIN">ADMIN</option>
-              </select>
-              <label>Branch (for BRANCH_MANAGER)</label>
-              <select id="admin-user-branch-select"></select>
-              <div style="margin-top:12px;"><button id="admin-create-user">Create User</button></div>
-            </div>
-          </div>
-        </section>
-        <section class="panel">
-          <h2>Branches</h2>
           <table id="admin-branches-table"><thead><tr><th>ID</th><th>Name</th><th>Code</th></tr></thead><tbody></tbody></table>
         </section>
-        <section class="panel">
-          <h2>Users</h2>
-          <table id="admin-users-table"><thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Branch</th></tr></thead><tbody></tbody></table>
+
+        <section id="admin-section-dsas" class="admin-section panel hidden">
+          <div class="panel-header-row">
+            <h2>DSAs</h2>
+            <button class="secondary" id="toggle-dsa-form">+ New DSA</button>
+          </div>
+          <small class="hint">DSAs normally enter the system via Branch Manager uploads. Use this to onboard one before their first sale, or to edit their branch/DTL directly - reassigning a DTL here goes through the same effective-dated history as an upload, it never overwrites past supervision records.</small>
+          <div id="dsa-form" class="collapsible hidden" style="margin-top:10px;">
+            <input type="hidden" id="dsa-form-id" />
+            <div class="row">
+              <div>
+                <label>DSA Code</label><input id="dsa-form-code" />
+                <label>DSA Name</label><input id="dsa-form-name" />
+                <label>DSA Account No</label><input id="dsa-form-account" />
+                <label>Branch</label><select id="dsa-form-branch"></select>
+                <label>DTL</label><select id="dsa-form-dtl"></select>
+                <div style="margin-top:12px;">
+                  <button id="dsa-form-save">Save DSA</button>
+                  <button class="secondary" id="dsa-form-cancel">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <table id="admin-dsas-table">
+            <thead><tr><th>Code</th><th>Name</th><th>Branch</th><th>Current DTL</th><th>Actions</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section id="admin-section-dtls" class="admin-section panel hidden">
+          <div class="panel-header-row">
+            <h2>DTLs</h2>
+            <button class="secondary" id="toggle-dtl-form">+ New DTL</button>
+          </div>
+          <div id="dtl-form" class="collapsible hidden">
+            <label>DTL Code</label><input id="admin-dtl-code" />
+            <label>DTL Name</label><input id="admin-dtl-name" />
+            <label>Branch</label><select id="admin-dtl-branch"></select>
+            <div style="margin-top:12px;"><button id="admin-create-dtl">Create</button></div>
+          </div>
+          <table id="admin-dtls-table"><thead><tr><th>Code</th><th>Name</th><th>Branch</th></tr></thead><tbody></tbody></table>
         </section>
       </section>
     </main>

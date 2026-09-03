@@ -1,7 +1,7 @@
 import datetime as dt
 
-from app.models import Branch, BranchSale, BusinessTransaction, Upload, User
-from app.models.enums import LoanType, UploadStatus, UploadType, UserRole
+from app.models import Branch, BranchSale, BusinessTransaction, Role, Upload, User
+from app.models.enums import LoanType, UploadStatus, UploadType
 from app.services.ingest_branch_manager import ParsedBranchRow
 from app.services.ingest_business_manager import ParsedBusinessRow
 from app.services.upsert import upsert_branch_sale, upsert_business_transaction
@@ -9,7 +9,8 @@ from app.services.upsert import upsert_branch_sale, upsert_business_transaction
 
 def _seed(db):
     branch = Branch(name="Arusha")
-    admin = User(email="admin@test.local", hashed_password="x", full_name="Admin", role=UserRole.ADMIN)
+    admin_role = db.query(Role).filter(Role.name == "ADMIN").one()
+    admin = User(email="admin@test.local", hashed_password="x", full_name="Admin", role_id=admin_role.id)
     db.add_all([branch, admin])
     db.flush()
     upload1 = Upload(

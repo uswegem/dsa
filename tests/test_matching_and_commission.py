@@ -9,10 +9,11 @@ from app.models import (
     Dsa,
     Dtl,
     MatchedTransaction,
+    Role,
     Upload,
     User,
 )
-from app.models.enums import LoanType, MatchStatus, RunStatus, RunType, UploadStatus, UploadType, UserRole
+from app.models.enums import LoanType, MatchStatus, RunStatus, RunType, UploadStatus, UploadType
 from app.services.commission import calculate_commission_run
 from app.services.matching import run_matching
 
@@ -26,7 +27,8 @@ def _seed_base(db):
     dtl = Dtl(dtl_code="DTL01", dtl_name="Grace T")
     db.add_all([dsa, dtl])
 
-    admin = User(email="admin@test.local", hashed_password="x", full_name="Admin", role=UserRole.ADMIN)
+    admin_role = db.query(Role).filter(Role.name == "ADMIN").one()
+    admin = User(email="admin@test.local", hashed_password="x", full_name="Admin", role_id=admin_role.id)
     db.add(admin)
     db.flush()
 

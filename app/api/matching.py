@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_business_manager, User
+from app.core.deps import require_permission
+from app.models import User
 from app.services.audit import log_action
 from app.services.matching import run_matching
 
@@ -10,7 +11,7 @@ router = APIRouter(prefix="/api/matching", tags=["matching"])
 
 
 @router.post("/run")
-def trigger_matching(db: Session = Depends(get_db), current_user: User = Depends(require_business_manager)):
+def trigger_matching(db: Session = Depends(get_db), current_user: User = Depends(require_permission("TRIGGER_MATCHING"))):
     """Manually re-run reconciliation across all unresolved rows. Uploads
     already trigger this automatically, but it's exposed directly too since
     the two files can land far apart and an operator may want to force a

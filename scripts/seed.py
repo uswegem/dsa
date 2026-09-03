@@ -1,7 +1,9 @@
 """
 One-time seed: creates the tables (if alembic hasn't been run) is NOT done
-here - run `alembic upgrade head` first. This script only inserts an initial
-ADMIN user and a sample Branch so there's something to log into.
+here - run `alembic upgrade head` first (this also seeds the ADMIN /
+BRANCH_MANAGER / BUSINESS_MANAGER roles and permission catalog). This
+script only inserts an initial user with the ADMIN role and a sample
+Branch so there's something to log into.
 
 Usage:
     venv/Scripts/python.exe scripts/seed.py --email you@example.com --password "..." --name "Your Name"
@@ -14,8 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.database import SessionLocal
 from app.core.security import hash_password
-from app.models import Branch, User
-from app.models.enums import UserRole
+from app.models import Branch, Role, User
 
 
 def main():
@@ -30,14 +31,19 @@ def main():
     try:
         existing = db.query(User).filter(User.email == args.email).first()
         if existing:
-            print(f"User {args.email} already exists (id={existing.id}, role={existing.role.value}); nothing to do.")
+            print(f"User {args.email} already exists (id={existing.id}, role={existing.role.name}); nothing to do.")
+            return
+
+        admin_role = db.query(Role).filter(Role.name == "ADMIN").first()
+        if admin_role is None:
+            print("No 'ADMIN' role found - run `alembic upgrade head` first (it seeds the roles/permissions).")
             return
 
         user = User(
             email=args.email,
             hashed_password=hash_password(args.password),
             full_name=args.name,
-            role=UserRole.ADMIN,
+            role_id=admin_role.id,
             branch_id=None,
         )
         db.add(user)

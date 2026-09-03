@@ -1,5 +1,4 @@
 from app.models.enums import (
-    UserRole,
     UploadType,
     UploadStatus,
     MatchStatus,
@@ -9,6 +8,7 @@ from app.models.enums import (
     RunType,
     RunStatus,
 )
+from app.models.rbac import Role, Permission, role_permissions
 from app.models.user import Branch, User
 from app.models.dsa import Dsa, Dtl, DsaDtlAssignment
 from app.models.upload import Upload, UploadError
@@ -17,7 +17,6 @@ from app.models.commission import CommissionRun, CommissionLine, CommissionAdjus
 from app.models.audit import AuditLog
 
 __all__ = [
-    "UserRole",
     "UploadType",
     "UploadStatus",
     "MatchStatus",
@@ -26,6 +25,9 @@ __all__ = [
     "PayeeType",
     "RunType",
     "RunStatus",
+    "Role",
+    "Permission",
+    "role_permissions",
     "Branch",
     "User",
     "Dsa",

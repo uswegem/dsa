@@ -5,14 +5,15 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_business_manager, require_branch_manager, require_any
+from app.core.deps import require_any_permission, require_permission
 from app.models import Branch, BranchSale, Upload, UploadError, User
-from app.models.enums import UploadStatus, UploadType, UserRole
+from app.models.enums import UploadStatus, UploadType
 from app.schemas.upload import UploadDetailOut, UploadOut, UploadSubmitResult
 from app.services.audit import log_action
 from app.services.ingest_branch_manager import parse_branch_manager_file
 from app.services.ingest_business_manager import parse_business_manager_file
 from app.services.matching import run_matching
+from app.services.permissions import user_has_permission
 from app.services.roster_sync import sync_roster_from_branch_sales
 from app.services.storage import save_upload_file
 from app.services.upsert import upsert_branch_sale, upsert_business_transaction
@@ -32,7 +33,7 @@ def _validate_period(period_month: int, period_year: int) -> None:
 
 def _scope_uploads_query(db: Session, current_user: User):
     q = db.query(Upload)
-    if current_user.role == UserRole.BRANCH_MANAGER:
+    if not user_has_permission(current_user, "VIEW_ALL_UPLOADS"):
         q = q.filter(Upload.branch_id == current_user.branch_id)
     return q
 
@@ -48,7 +49,7 @@ async def upload_branch_manager_file(
     period_year: int = Form(...),
     branch_id: int | None = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_branch_manager),
+    current_user: User = Depends(require_permission("UPLOAD_BRANCH_FILE")),
 ):
     """Roster/attribution upload. Accepts a single-sheet file (one branch)
     or a multi-sheet workbook (one sheet per branch, sheet name = branch
@@ -57,10 +58,15 @@ async def upload_branch_manager_file(
     period already in progress updates existing rows rather than
     duplicating them. Rows whose DATE falls outside period_month/period_year
     (or is missing/unparseable) are rejected, not silently accepted.
+
+    Branch scoping: a user with a branch_id assigned (e.g. a Branch
+    Manager) is always restricted to their own branch, regardless of what
+    the form/sheets say. A user with no branch_id (org-wide, e.g. Admin)
+    may target any branch - explicitly via branch_id, or via matching
+    sheet names for a multi-sheet bulk/migration upload.
     """
     _validate_period(period_month, period_year)
-    if current_user.role == UserRole.BRANCH_MANAGER and current_user.branch_id is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Your account has no assigned branch - contact an admin.")
+    is_branch_scoped = current_user.branch_id is not None
 
     contents = await file.read()
     storage_path = save_upload_file(contents, file.filename, "branch_manager")
@@ -68,7 +74,7 @@ async def upload_branch_manager_file(
     upload = Upload(
         upload_type=UploadType.BRANCH_MANAGER,
         uploaded_by_user_id=current_user.id,
-        branch_id=current_user.branch_id if current_user.role == UserRole.BRANCH_MANAGER else branch_id,
+        branch_id=current_user.branch_id if is_branch_scoped else branch_id,
         period_month=period_month,
         period_year=period_year,
         original_filename=file.filename,
@@ -100,7 +106,7 @@ async def upload_branch_manager_file(
     is_multi_sheet = len(sheet_names) > 1
     sheet_level_rejected_rows = 0  # rows excluded because their sheet's branch couldn't be used/resolved
 
-    if current_user.role == UserRole.BRANCH_MANAGER:
+    if is_branch_scoped:
         own_branch = db.get(Branch, current_user.branch_id)
         for sheet_name in sheet_names:
             if is_multi_sheet and (own_branch is None or sheet_name.strip().lower() != own_branch.name.strip().lower()):
@@ -111,7 +117,7 @@ async def upload_branch_manager_file(
                     message=f"Sheet '{sheet_name}' ({len(skipped_rows)} rows) skipped - you can only upload data for your own branch.",
                 ))
         sheet_branch: dict[str, Branch] = {s: own_branch for s in rows_by_sheet}
-    else:  # ADMIN
+    else:  # org-wide user (e.g. Admin)
         sheet_branch = {}
         if not is_multi_sheet:
             sole_sheet = sheet_names[0] if sheet_names else None
@@ -189,7 +195,7 @@ async def upload_business_manager_file(
     period_month: int = Form(...),
     period_year: int = Form(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_business_manager),
+    current_user: User = Depends(require_permission("UPLOAD_BUSINESS_FILE")),
 ):
     """Org-wide payout report upload. Every row is upserted on
     (client_disb_ext_account_no, loan_type, disbursement_date) - a
@@ -264,12 +270,19 @@ async def upload_business_manager_file(
 
 
 @router.get("", response_model=list[UploadOut])
-def list_uploads(db: Session = Depends(get_db), current_user: User = Depends(require_any)):
+def list_uploads(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_permission("VIEW_ALL_UPLOADS", "VIEW_OWN_BRANCH_UPLOADS")),
+):
     return _scope_uploads_query(db, current_user).order_by(Upload.uploaded_at.desc()).all()
 
 
 @router.get("/{upload_id}", response_model=UploadDetailOut)
-def get_upload(upload_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_any)):
+def get_upload(
+    upload_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_permission("VIEW_ALL_UPLOADS", "VIEW_OWN_BRANCH_UPLOADS")),
+):
     upload = _scope_uploads_query(db, current_user).filter(Upload.id == upload_id).first()
     if upload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Upload not found")

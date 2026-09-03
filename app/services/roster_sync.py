@@ -92,10 +92,19 @@ def sync_assignment(db: Session, dsa: Dsa, dtl: Dtl, effective_from: dt.date) ->
         return  # unchanged, nothing to do
 
     if current is not None:
-        if effective_from <= current.effective_from:
+        if effective_from < current.effective_from:
             # A row from an earlier period than the current open assignment
             # arrived late; don't rewrite supervision history out from under
             # already-run commissions. No-op, but this is worth surfacing.
+            return
+        if effective_from == current.effective_from:
+            # A same-day correction (e.g. two Branch Manager uploads in one
+            # day, or an admin fixing a DSA's DTL right after creating it) -
+            # overwrite the still-open assignment in place rather than
+            # closing it the day before it started, which would produce a
+            # nonsensical effective_to < effective_from record.
+            current.dtl_id = dtl.id
+            db.flush()
             return
         current.effective_to = effective_from - dt.timedelta(days=1)
 

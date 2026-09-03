@@ -1,10 +1,8 @@
 import enum
 
-
-class UserRole(str, enum.Enum):
-    BRANCH_MANAGER = "BRANCH_MANAGER"
-    BUSINESS_MANAGER = "BUSINESS_MANAGER"
-    ADMIN = "ADMIN"
+# User roles are no longer a fixed enum - see app/models/rbac.py (Role,
+# Permission) and app/services/permissions.py for the RBAC model that
+# replaced it.
 
 
 class UploadType(str, enum.Enum):

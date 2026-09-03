@@ -2,10 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_any
+from app.core.deps import require_any_permission
 from app.models import MatchedTransaction, User
-from app.models.enums import MatchStatus, UserRole
+from app.models.enums import MatchStatus
 from app.schemas.commission import ExceptionRow
+from app.services.permissions import user_has_permission
 
 router = APIRouter(prefix="/api/exceptions", tags=["exceptions"])
 
@@ -22,9 +23,9 @@ def list_exceptions(
     period: str | None = None,
     branch_id: int | None = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_any),
+    current_user: User = Depends(require_any_permission("VIEW_ALL_EXCEPTIONS", "VIEW_OWN_BRANCH_EXCEPTIONS")),
 ):
-    if current_user.role == UserRole.BRANCH_MANAGER:
+    if not user_has_permission(current_user, "VIEW_ALL_EXCEPTIONS"):
         branch_id = current_user.branch_id  # forced scope, can't be widened by query param
 
     q = db.query(MatchedTransaction).filter(MatchedTransaction.match_status.in_(EXCEPTION_STATUSES))

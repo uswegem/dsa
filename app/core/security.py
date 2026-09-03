@@ -18,12 +18,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return _pwd_context.verify(plain_password, hashed_password)
 
 
-def create_access_token(subject: str, role: str, branch_id: int | None) -> str:
+def create_access_token(subject: str) -> str:
+    """The token only carries identity (subject=email). Role/permissions are
+    never trusted from the token - every request re-loads the current User
+    (and their live role/permissions) from the database, so a permission
+    change takes effect immediately without waiting for re-login."""
     expire = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=settings.access_token_expire_minutes)
     payload = {
         "sub": subject,
-        "role": role,
-        "branch_id": branch_id,
         "exp": expire,
     }
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
