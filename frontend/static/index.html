@@ -3,240 +3,372 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>DSA/DTL Commission App</title>
+  <title>Letshego Faidika Bank — DSA/DTL Commission App</title>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <header>
-    <h1>Letshego Faidika Bank &mdash; DSA/DTL Commission App</h1>
-    <div id="userbox"></div>
-  </header>
 
   <div id="login-screen">
-    <main style="max-width:400px;">
-      <section class="panel">
-        <h2>Sign in</h2>
+    <div class="login-card">
+      <div class="login-hero">
+        <img src="/static/assets/lfb-logo.png" alt="Letshego Faidika Bank" />
+        <div>
+          <div class="rule"></div>
+          <h1>DSA/DTL Commission</h1>
+          <p>Branch and business manager uploads, matching, exceptions and monthly commission runs — in one reconciled ledger.</p>
+        </div>
+        <div class="login-stats">
+          <div><div class="label">Period</div><div class="value" id="login-stat-period">—</div></div>
+          <div><div class="label">Branches live</div><div class="value" id="login-stat-branches">—</div></div>
+          <div><div class="label">Support</div><div class="value">+255 754 730 813</div></div>
+        </div>
+      </div>
+      <div class="login-form-panel">
+        <div class="login-form-head">
+          <div>
+            <h2>Sign in</h2>
+            <p>Commission administration portal</p>
+          </div>
+          <select><option>English</option><option>Kiswahili</option></select>
+        </div>
+
         <div id="login-flash"></div>
+
         <label>Email</label>
-        <input id="login-email" type="email" style="width:100%" />
+        <input id="login-email" type="email" />
         <label>Password</label>
-        <input id="login-password" type="password" style="width:100%" />
-        <div style="margin-top:16px;"><button id="login-btn" style="width:100%">Sign in</button></div>
-      </section>
-    </main>
+        <input id="login-password" type="password" />
+
+        <div class="login-row">
+          <label><input type="checkbox" checked /> Remember me</label>
+          <a href="#">Forgot password?</a>
+        </div>
+
+        <button id="login-btn">Sign in</button>
+
+        <div class="login-footer">
+          <div class="login-footer-rule">
+            <span>Letshego Faidika Bank · Internal use only</span>
+            <span>v2.4.0</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="app-screen" class="hidden">
-    <nav id="tabs">
-      <button data-tab="uploads" class="active">Uploads</button>
-      <button data-tab="runs">Commission Runs</button>
-      <button data-tab="exceptions">Exceptions</button>
-      <button data-tab="admin">Admin</button>
-    </nav>
-    <main>
-      <div id="flash"></div>
+    <div class="topbar">
+      <img src="/static/assets/lfb-logo.png" alt="Letshego Faidika Bank" />
+      <div class="topbar-right" id="userbox"></div>
+    </div>
 
-      <section id="tab-uploads" class="tab">
-        <div class="row">
-          <div class="panel" id="panel-branch-upload">
-            <h2>Upload Branch Manager File (roster)</h2>
-            <small class="hint">Uploads are upserts: re-uploading for a period already in progress updates existing rows for that period, it never duplicates them. Rows whose DATE falls outside the period you select below are rejected and listed after submit.</small>
-            <label>Branch (admin only - leave blank if the sheet is named after the branch)</label>
-            <select id="bm-branch-select"></select>
-            <label>Period</label>
-            <div style="display:flex; gap:8px;">
-              <select id="bm-period-month" style="flex:1"></select>
-              <select id="bm-period-year" style="flex:1"></select>
-            </div>
-            <label>File (.xlsx)</label>
-            <input id="bm-file" type="file" accept=".xlsx,.xls" />
-            <div style="margin-top:12px;"><button id="bm-upload-btn">Upload</button></div>
-          </div>
-          <div class="panel" id="panel-business-upload">
-            <h2>Upload Business Manager File (payout report)</h2>
-            <small class="hint">Uploads are upserts, same as the roster file. Rows whose Disbursement date falls outside the period you select below are rejected and listed after submit.</small>
-            <label>Period</label>
-            <div style="display:flex; gap:8px;">
-              <select id="bz-period-month" style="flex:1"></select>
-              <select id="bz-period-year" style="flex:1"></select>
-            </div>
-            <label>File (.xlsx)</label>
-            <input id="bz-file" type="file" accept=".xlsx,.xls" />
-            <div style="margin-top:12px;"><button id="bz-upload-btn">Upload</button></div>
-          </div>
-        </div>
-        <section class="panel">
-          <h2>Recent Uploads</h2>
-          <button class="secondary" id="refresh-uploads">Refresh</button>
-          <table id="uploads-table">
-            <thead><tr><th>ID</th><th>Type</th><th>Branch</th><th>Period</th><th>Filename</th><th>Status</th><th>Accepted</th><th>Rejected</th><th>Warnings</th><th>Uploaded</th></tr></thead>
-            <tbody></tbody>
-          </table>
-          <div id="upload-detail"></div>
-        </section>
-      </section>
-
-      <section id="tab-runs" class="tab hidden">
-        <section class="panel">
-          <h2>Create Commission Run</h2>
-          <div class="row">
-            <div>
-              <label>Type</label>
-              <select id="run-type"><option value="ORG_WIDE">ORG_WIDE (all branches)</option><option value="BRANCH">BRANCH</option></select>
-              <label>Branch (BRANCH runs only)</label>
-              <select id="run-branch-select"></select>
-              <label>Period (YYYY-MM)</label>
-              <input id="run-period" placeholder="2026-08" />
-              <div style="margin-top:12px;"><button id="create-run-btn">Create Run</button></div>
-            </div>
-          </div>
-        </section>
-        <section class="panel">
-          <h2>Commission Runs</h2>
-          <button class="secondary" id="refresh-runs">Refresh</button>
-          <table id="runs-table">
-            <thead><tr><th>ID</th><th>Type</th><th>Branch</th><th>Period</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </section>
-      </section>
-
-      <section id="tab-exceptions" class="tab hidden">
-        <section class="panel">
-          <h2>Exceptions</h2>
-          <small class="hint">Unmatched, duplicate, and match-quality-warning rows. These block nothing but must be reviewed before a run is locked.</small>
-          <div class="row" style="margin-top:10px;">
-            <div>
-              <label>Period (YYYY-MM, optional)</label>
-              <input id="exc-period" placeholder="2026-08" />
-            </div>
-            <div>
-              <label>Branch (admin/business manager only)</label>
-              <select id="exc-branch-select"></select>
-            </div>
-          </div>
-          <div style="margin-top:12px;">
-            <button id="exc-load-btn">Load</button>
-            <button class="secondary" id="exc-download-btn">Download Exceptions (.xlsx)</button>
-          </div>
-          <table id="exceptions-table">
-            <thead><tr><th>Category</th><th>Branch</th><th>Client</th><th>Acct (Branch)</th><th>Acct (Business)</th><th>DSA</th><th>Loan Type</th><th>Disb. Date</th><th>Notes</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </section>
-      </section>
-
-      <section id="tab-admin" class="tab hidden">
-        <nav id="admin-subnav">
-          <button data-admin-section="users" data-perm="MANAGE_USERS" class="active">Users</button>
-          <button data-admin-section="roles" data-perm="MANAGE_ROLES">Roles</button>
-          <button data-admin-section="branches" data-perm="MANAGE_BRANCHES">Branches</button>
-          <button data-admin-section="dsas" data-perm="MANAGE_DSAS">DSAs</button>
-          <button data-admin-section="dtls" data-perm="MANAGE_DTLS">DTLs</button>
+    <div class="shell-body">
+      <div class="sidebar">
+        <div class="sidebar-group-label">Commission</div>
+        <nav id="top-nav">
+          <button class="sidebar-item active" data-tab="uploads">
+            <span>Uploads</span><span class="sidebar-pill" id="pill-uploads"></span>
+          </button>
+          <button class="sidebar-item" data-tab="runs">Commission Runs</button>
+          <button class="sidebar-item" data-tab="exceptions">
+            <span>Exceptions</span><span class="sidebar-pill exc" id="pill-exceptions"></span>
+          </button>
         </nav>
 
-        <section id="admin-section-users" class="admin-section panel">
-          <div class="panel-header-row">
-            <h2>Users</h2>
-            <button class="secondary" id="toggle-user-form">+ New User</button>
+        <div id="admin-nav-group">
+          <div class="sidebar-divider"></div>
+          <div class="sidebar-group-label">Administration</div>
+          <nav id="admin-subnav">
+            <button class="sidebar-item admin-item active" data-admin-section="users" data-perm="MANAGE_USERS">Users</button>
+            <button class="sidebar-item admin-item" data-admin-section="roles" data-perm="MANAGE_ROLES">Roles</button>
+            <button class="sidebar-item admin-item" data-admin-section="branches" data-perm="MANAGE_BRANCHES">Branches</button>
+            <button class="sidebar-item admin-item" data-admin-section="dsas" data-perm="MANAGE_DSAS">DSAs</button>
+            <button class="sidebar-item admin-item" data-admin-section="dtls" data-perm="MANAGE_DTLS">DTLs</button>
+          </nav>
+        </div>
+
+        <div class="sidebar-footer">
+          <div class="sidebar-footer-inner">
+            <div class="label">Today</div>
+            <div class="value" id="sidebar-today">—</div>
           </div>
-          <div id="user-form" class="collapsible hidden">
-            <div class="row">
+        </div>
+      </div>
+
+      <div class="content">
+        <div class="page-header">
+          <div>
+            <div class="crumb" id="page-crumb">Commission · Data intake</div>
+            <h1 id="page-title">Uploads</h1>
+          </div>
+          <div class="page-header-right">
+            <div class="page-header-scope">
+              <div class="label">Scope</div>
+              <div class="value" id="page-scope">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="flash"></div>
+
+        <section id="tab-uploads" class="tab">
+          <div class="row">
+            <div class="panel panel-pad" id="panel-branch-upload" style="min-width:0">
+              <h2>Upload Branch Manager File</h2>
+              <div class="kicker">Roster</div>
+              <div class="upsert-note">Uploads are upserts: re-uploading for a period already in progress updates existing rows for that period, it never duplicates them. Rows whose DATE falls outside the period you select below are rejected and listed after submit.</div>
+              <label>Branch <span class="qualifier">— admin only, leave blank if the sheet is named after the branch</span></label>
+              <select id="bm-branch-select"></select>
+              <label>Period</label>
+              <div style="display:flex; gap:10px;">
+                <select id="bm-period-month" style="flex:1"></select>
+                <select id="bm-period-year" style="flex:1"></select>
+              </div>
+              <label>File (.xlsx)</label>
+              <div class="file-drop">
+                <button type="button" class="secondary" id="bm-file-trigger">Choose file</button>
+                <span class="file-name" id="bm-file-name">No file chosen</span>
+                <input id="bm-file" type="file" accept=".xlsx,.xls" />
+              </div>
+              <button id="bm-upload-btn" style="margin-top:18px;">Upload</button>
+            </div>
+
+            <div class="panel panel-pad" id="panel-business-upload" style="min-width:0">
+              <h2>Upload Business Manager File</h2>
+              <div class="kicker">Payout report</div>
+              <div class="upsert-note">Uploads are upserts, same as the roster file. Rows whose Disbursement date falls outside the period you select below are rejected and listed after submit.</div>
+              <label>Period</label>
+              <div style="display:flex; gap:10px;">
+                <select id="bz-period-month" style="flex:1"></select>
+                <select id="bz-period-year" style="flex:1"></select>
+              </div>
+              <label>File (.xlsx)</label>
+              <div class="file-drop">
+                <button type="button" class="secondary" id="bz-file-trigger">Choose file</button>
+                <span class="file-name" id="bz-file-name">No file chosen</span>
+                <input id="bz-file" type="file" accept=".xlsx,.xls" />
+              </div>
+              <button id="bz-upload-btn" style="margin-top:18px;">Upload</button>
+            </div>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Recent Uploads</h2>
+              <button class="secondary" id="refresh-uploads">Refresh</button>
+            </div>
+            <div class="table-wrap">
+              <table id="uploads-table" style="min-width:1030px">
+                <thead><tr>
+                  <th>ID</th><th>Type</th><th>Branch</th><th>Period</th><th>Filename</th><th>Status</th>
+                  <th class="right">Accepted</th><th class="right">Rejected</th><th class="right">Warnings</th><th>Uploaded</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="panel-foot" id="uploads-foot">click a row for accepted, rejected and warning detail</div>
+          </section>
+          <div id="upload-detail"></div>
+        </section>
+
+        <section id="tab-runs" class="tab hidden">
+          <section class="panel panel-pad">
+            <h2>Create Commission Run</h2>
+            <p class="hint" style="max-width:70ch; margin:6px 0 16px;">A run snapshots matched sales for the period. Org-wide runs cover every branch; branch runs cover one. Runs move DRAFT → REVIEWED → LOCKED → PAID.</p>
+            <div class="grid cols-3 end" style="grid-template-columns:repeat(3,1fr) auto;">
               <div>
-                <label>Email</label><input id="user-form-email" type="email" />
-                <label>Full name</label><input id="user-form-name" />
-                <label>Password</label><input id="user-form-password" type="password" />
-                <label>Role</label>
-                <select id="user-form-role"></select>
-                <label>Branch (for branch-scoped roles)</label>
-                <select id="user-form-branch"></select>
-                <div style="margin-top:12px;">
+                <label>Type</label>
+                <select id="run-type"><option value="ORG_WIDE">ORG_WIDE (all branches)</option><option value="BRANCH">BRANCH</option></select>
+              </div>
+              <div>
+                <label>Branch <span class="qualifier">— BRANCH runs only</span></label>
+                <select id="run-branch-select"></select>
+              </div>
+              <div>
+                <label>Period (YYYY-MM)</label>
+                <input id="run-period" class="tabular" placeholder="2026-08" />
+              </div>
+              <button id="create-run-btn" style="white-space:nowrap;">Create Run</button>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Commission Runs</h2>
+              <button class="secondary" id="refresh-runs">Refresh</button>
+            </div>
+            <div class="table-wrap">
+              <table id="runs-table">
+                <thead><tr><th>ID</th><th>Type</th><th>Branch</th><th>Period</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-exceptions" class="tab hidden">
+          <section class="panel panel-pad">
+            <h2>Exceptions</h2>
+            <p class="hint" style="max-width:80ch; margin:6px 0 16px;">Unmatched, duplicate, and match-quality-warning rows. These block nothing but must be reviewed before a run is locked.</p>
+            <div class="grid end" style="grid-template-columns:1fr 1fr auto auto;">
+              <div>
+                <label>Period (YYYY-MM, optional)</label>
+                <input id="exc-period" class="tabular" placeholder="2026-08" />
+              </div>
+              <div>
+                <label>Branch <span class="qualifier">— admin / business manager only</span></label>
+                <select id="exc-branch-select"></select>
+              </div>
+              <button id="exc-load-btn">Load</button>
+              <button class="secondary" id="exc-download-btn" style="white-space:nowrap;">Download Exceptions (.xlsx)</button>
+            </div>
+          </section>
+
+          <div class="stat-cards" id="exceptions-stats">
+            <div class="stat-card error"><div class="stat-label">Unmatched in business file</div><div class="stat-figure" id="stat-unmatched-biz">0</div></div>
+            <div class="stat-card error"><div class="stat-label">Unmatched in branch file</div><div class="stat-figure" id="stat-unmatched-branch">0</div></div>
+            <div class="stat-card error"><div class="stat-label">Duplicates</div><div class="stat-figure" id="stat-duplicates">0</div></div>
+            <div class="stat-card warn"><div class="stat-label">Match warnings</div><div class="stat-figure" id="stat-warnings">0</div></div>
+          </div>
+
+          <section class="panel">
+            <div class="table-wrap">
+              <table id="exceptions-table" style="min-width:1080px">
+                <thead><tr><th>Category</th><th>Branch</th><th>Client</th><th>Acct (Branch)</th><th>Acct (Business)</th><th>DSA</th><th>Loan Type</th><th>Disb. Date</th><th>Notes</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-admin" class="tab hidden">
+          <section id="admin-section-users" class="admin-section panel">
+            <div class="panel-head">
+              <h2>Users</h2>
+              <button class="secondary" id="toggle-user-form">+ New User</button>
+            </div>
+            <div id="user-form" class="collapsible hidden">
+              <div class="grid cols-3">
+                <div>
+                  <label>Email</label><input id="user-form-email" type="email" />
+                </div>
+                <div>
+                  <label>Full name</label><input id="user-form-name" />
+                </div>
+                <div>
+                  <label>Password</label><input id="user-form-password" type="password" />
+                </div>
+                <div>
+                  <label>Role</label><select id="user-form-role"></select>
+                </div>
+                <div>
+                  <label>Branch <span class="qualifier">— branch-scoped roles</span></label><select id="user-form-branch"></select>
+                </div>
+                <div class="field-end">
                   <button id="user-form-save">Create User</button>
                 </div>
               </div>
             </div>
-          </div>
-          <table id="admin-users-table"><thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Branch</th></tr></thead><tbody></tbody></table>
-        </section>
-
-        <section id="admin-section-roles" class="admin-section panel hidden">
-          <div class="panel-header-row">
-            <h2>Roles</h2>
-            <button class="secondary" id="toggle-role-form">+ New Role</button>
-          </div>
-          <div id="role-form" class="collapsible hidden">
-            <input type="hidden" id="role-form-id" />
-            <label>Name</label><input id="role-form-name" />
-            <label>Description</label><input id="role-form-description" />
-            <label>Permissions</label>
-            <div id="role-form-permissions" class="checkbox-grid"></div>
-            <div style="margin-top:12px;">
-              <button id="role-form-save">Save Role</button>
-              <button class="secondary" id="role-form-cancel">Cancel</button>
+            <div class="table-wrap">
+              <table id="admin-users-table"><thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Branch</th></tr></thead><tbody></tbody></table>
             </div>
-          </div>
-          <table id="admin-roles-table">
-            <thead><tr><th>Name</th><th>Description</th><th>Permissions</th><th>System?</th><th>Actions</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </section>
+          </section>
 
-        <section id="admin-section-branches" class="admin-section panel hidden">
-          <div class="panel-header-row">
-            <h2>Branches</h2>
-            <button class="secondary" id="toggle-branch-form">+ New Branch</button>
-          </div>
-          <div id="branch-form" class="collapsible hidden">
-            <label>Name</label><input id="admin-branch-name" />
-            <label>Code</label><input id="admin-branch-code" />
-            <div style="margin-top:12px;"><button id="admin-create-branch">Create</button></div>
-          </div>
-          <table id="admin-branches-table"><thead><tr><th>ID</th><th>Name</th><th>Code</th></tr></thead><tbody></tbody></table>
-        </section>
+          <section id="admin-section-roles" class="admin-section panel hidden">
+            <div class="panel-head">
+              <h2>Roles</h2>
+              <button class="secondary" id="toggle-role-form">+ New Role</button>
+            </div>
+            <div id="role-form" class="collapsible hidden">
+              <input type="hidden" id="role-form-id" />
+              <div class="grid cols-2">
+                <div><label>Name</label><input id="role-form-name" /></div>
+                <div><label>Description</label><input id="role-form-description" /></div>
+              </div>
+              <label style="margin-top:18px;">Permissions</label>
+              <div id="role-form-permissions" class="checkbox-grid"></div>
+              <div class="field-end" style="margin-top:18px;">
+                <button id="role-form-save">Save Role</button>
+                <button class="secondary" id="role-form-cancel">Cancel</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table id="admin-roles-table">
+                <thead><tr><th>Name</th><th>Description</th><th>Permissions</th><th>System?</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
 
-        <section id="admin-section-dsas" class="admin-section panel hidden">
-          <div class="panel-header-row">
-            <h2>DSAs</h2>
-            <button class="secondary" id="toggle-dsa-form">+ New DSA</button>
-          </div>
-          <small class="hint">DSAs normally enter the system via Branch Manager uploads. Use this to onboard one before their first sale, or to edit their branch/DTL directly - reassigning a DTL here goes through the same effective-dated history as an upload, it never overwrites past supervision records.</small>
-          <div id="dsa-form" class="collapsible hidden" style="margin-top:10px;">
-            <input type="hidden" id="dsa-form-id" />
-            <div class="row">
+          <section id="admin-section-branches" class="admin-section panel hidden" style="max-width:720px">
+            <div class="panel-head">
+              <h2>Branches</h2>
+              <button class="secondary" id="toggle-branch-form">+ New Branch</button>
+            </div>
+            <div id="branch-form" class="collapsible hidden">
+              <div class="grid" style="grid-template-columns:1fr 1fr auto; align-items:end;">
+                <div><label>Name</label><input id="admin-branch-name" /></div>
+                <div><label>Code</label><input id="admin-branch-code" class="mono" /></div>
+                <button id="admin-create-branch">Create</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table id="admin-branches-table"><thead><tr><th>ID</th><th>Name</th><th>Code</th></tr></thead><tbody></tbody></table>
+            </div>
+          </section>
+
+          <section id="admin-section-dsas" class="admin-section panel hidden">
+            <div class="panel-head">
               <div>
-                <label>DSA Code</label><input id="dsa-form-code" />
-                <label>DSA Name</label><input id="dsa-form-name" />
-                <label>DSA Account No</label><input id="dsa-form-account" />
-                <label>Branch</label><select id="dsa-form-branch"></select>
-                <label>DTL</label><select id="dsa-form-dtl"></select>
-                <div style="margin-top:12px;">
+                <h2>DSAs</h2>
+                <p class="subtitle">DSAs normally enter the system via Branch Manager uploads. Use this to onboard one before their first sale, or to edit their branch/DTL directly — reassigning a DTL here goes through the same effective-dated history as an upload, it never overwrites past supervision records.</p>
+              </div>
+              <button class="secondary" id="toggle-dsa-form" style="white-space:nowrap; flex:none;">+ New DSA</button>
+            </div>
+            <div id="dsa-form" class="collapsible hidden">
+              <input type="hidden" id="dsa-form-id" />
+              <div class="grid cols-3">
+                <div><label>DSA Code</label><input id="dsa-form-code" class="mono" /></div>
+                <div><label>DSA Name</label><input id="dsa-form-name" /></div>
+                <div><label>DSA Account No</label><input id="dsa-form-account" class="tabular" /></div>
+                <div><label>Branch</label><select id="dsa-form-branch"></select></div>
+                <div><label>DTL</label><select id="dsa-form-dtl"></select></div>
+                <div class="field-end">
                   <button id="dsa-form-save">Save DSA</button>
                   <button class="secondary" id="dsa-form-cancel">Cancel</button>
                 </div>
               </div>
             </div>
-          </div>
-          <table id="admin-dsas-table">
-            <thead><tr><th>Code</th><th>Name</th><th>Branch</th><th>Current DTL</th><th>Actions</th></tr></thead>
-            <tbody></tbody>
-          </table>
+            <div class="table-wrap">
+              <table id="admin-dsas-table">
+                <thead><tr><th>Code</th><th>Name</th><th>Branch</th><th>Current DTL</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="admin-section-dtls" class="admin-section panel hidden" style="max-width:820px">
+            <div class="panel-head">
+              <h2>DTLs</h2>
+              <button class="secondary" id="toggle-dtl-form">+ New DTL</button>
+            </div>
+            <div id="dtl-form" class="collapsible hidden">
+              <div class="grid" style="grid-template-columns:1fr 1fr 1fr auto; align-items:end;">
+                <div><label>DTL Code</label><input id="admin-dtl-code" class="mono" /></div>
+                <div><label>DTL Name</label><input id="admin-dtl-name" /></div>
+                <div><label>Branch</label><select id="admin-dtl-branch"></select></div>
+                <button id="admin-create-dtl">Create</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table id="admin-dtls-table"><thead><tr><th>Code</th><th>Name</th><th>Branch</th></tr></thead><tbody></tbody></table>
+            </div>
+          </section>
         </section>
 
-        <section id="admin-section-dtls" class="admin-section panel hidden">
-          <div class="panel-header-row">
-            <h2>DTLs</h2>
-            <button class="secondary" id="toggle-dtl-form">+ New DTL</button>
-          </div>
-          <div id="dtl-form" class="collapsible hidden">
-            <label>DTL Code</label><input id="admin-dtl-code" />
-            <label>DTL Name</label><input id="admin-dtl-name" />
-            <label>Branch</label><select id="admin-dtl-branch"></select>
-            <div style="margin-top:12px;"><button id="admin-create-dtl">Create</button></div>
-          </div>
-          <table id="admin-dtls-table"><thead><tr><th>Code</th><th>Name</th><th>Branch</th></tr></thead><tbody></tbody></table>
-        </section>
-      </section>
-    </main>
+      </div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

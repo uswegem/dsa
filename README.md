@@ -17,9 +17,38 @@ which now hosts a dedicated `dsa` database and a scoped `dsa_app` login role
 - DB: PostgreSQL (via SQLAlchemy 2.0 + Alembic + psycopg3)
 - File processing: pandas + openpyxl
 - Auth: JWT (python-jose), role stored on the user record
-- Frontend: minimal server-served vanilla HTML/JS (`frontend/static/`) -
-  prioritizes a correct upload -> match -> calculate -> export flow over
-  frontend polish, per the build brief.
+- Frontend: server-served vanilla HTML/JS (`frontend/static/`), LFB-branded
+  (see "Brand" below) - prioritizes a correct upload -> match -> calculate
+  -> export flow over frontend polish, per the build brief.
+
+## Brand
+
+Rebranded to Letshego Faidika Bank per
+`docs/design_handoff_lfb_commission_rebrand/README.md` - visual layer only,
+no functional change: black/`#FECD07` yellow LFB palette, Poppins
+typeface, and the top tab bar replaced by a persistent left sidebar
+(`app/static/index.html` + `style.css`; `app.js`'s element IDs and
+event-wiring logic are unchanged, per that handoff's explicit constraint -
+verified by diffing every `id=` attribute against the pre-rebrand version).
+`app/static/assets/lfb-logo.png` is the supplied logo asset.
+
+Three points where the handoff's mockup diverged from actual app behavior
+or scope, resolved with the business owner before building (see git log):
+- Commission Runs' footer copy about locking being blocked by open
+  exceptions was **false** (the engine deliberately never blocks a lock on
+  exceptions) - replaced with accurate copy instead of shipping the claim.
+- "Reopen" (on PAID runs) and "History" (on DSAs) appear in the mockup but
+  have no backing endpoint - omitted rather than shipped as dead links.
+- Login's "Remember me" / "Forgot password?" / language switcher are
+  inert by agreement (no backend support exists) - kept as non-misleading
+  placeholders since the session is already always persisted regardless.
+
+Verified with a full Playwright screenshot pass against every screen
+(login, uploads incl. the tabbed upload-detail stat strip, commission
+runs, exceptions, and all five Admin sub-sections) - caught and fixed two
+real CSS specificity bugs along the way (sidebar items inheriting the base
+button's yellow fill and full border; a stale `.active` class left on the
+Admin sidebar group when navigating back to a top-level tab).
 
 ## Project layout
 

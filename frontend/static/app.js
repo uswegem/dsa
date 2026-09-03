@@ -39,28 +39,65 @@ async function login() {
     localStorage.setItem("dsa_token", state.token);
     await afterLogin();
   } catch (e) {
-    flash(e.message, "err", "login-flash");
+    flash(`<strong>Sign-in failed.</strong> ${e.message}`, "err", "login-flash");
   }
 }
 
 const ADMIN_SECTION_PERMS = ["MANAGE_USERS", "MANAGE_ROLES", "MANAGE_BRANCHES", "MANAGE_DSAS", "MANAGE_DTLS"];
 
+const PAGE_META = {
+  uploads: { crumb: "Commission · Data intake", title: "Uploads" },
+  runs: { crumb: "Commission · Payouts", title: "Commission Runs" },
+  exceptions: { crumb: "Commission · Review", title: "Exceptions" },
+  admin: {
+    users: { crumb: "Administration", title: "Users" },
+    roles: { crumb: "Administration", title: "Roles" },
+    branches: { crumb: "Administration", title: "Branches" },
+    dsas: { crumb: "Administration", title: "DSAs" },
+    dtls: { crumb: "Administration", title: "DTLs" },
+  },
+};
+
+function setPageHeader(crumb, title) {
+  document.getElementById("page-crumb").textContent = crumb;
+  document.getElementById("page-title").textContent = title;
+}
+
+function initials(name) {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  const first = parts[0][0] || "";
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
+  return (first + last).toUpperCase();
+}
+
 async function afterLogin() {
   state.user = await api("/api/auth/me");
   document.getElementById("login-screen").classList.add("hidden");
   document.getElementById("app-screen").classList.remove("hidden");
-  document.getElementById("userbox").innerHTML =
-    `${state.user.full_name} (${state.user.role_name}) <button class="secondary" id="logout-btn">Sign out</button>`;
-  document.getElementById("logout-btn").onclick = logout;
 
-  document.querySelector('nav button[data-tab="admin"]').classList.toggle("hidden", !hasAnyPerm(ADMIN_SECTION_PERMS));
+  await loadBranches();
+
+  const branchLabel = state.user.branch_id ? branchName(state.user.branch_id) : null;
+  document.getElementById("userbox").innerHTML = `
+    <div class="topbar-identity">
+      <div class="name">${state.user.full_name}</div>
+      <div class="subtitle">${state.user.role_name}${branchLabel ? " · " + branchLabel : ""}</div>
+    </div>
+    <div class="avatar-chip">${initials(state.user.full_name)}</div>
+    <button id="logout-btn">Sign out</button>`;
+  document.getElementById("logout-btn").onclick = logout;
+  document.getElementById("page-scope").textContent = branchLabel || "All branches";
+  document.getElementById("sidebar-today").textContent = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+
+  document.getElementById("admin-nav-group").classList.toggle("hidden", !hasAnyPerm(ADMIN_SECTION_PERMS));
   document.querySelectorAll("#admin-subnav button").forEach(b => {
     b.classList.toggle("hidden", !hasPerm(b.dataset.perm));
   });
 
-  await loadBranches();
   await refreshUploads();
   await refreshRuns();
+  refreshSidebarExceptionsPill();
 }
 
 function logout() {
@@ -101,34 +138,118 @@ function populatePeriodSelects(monthSelId, yearSelId) {
   yearSel.value = now.getFullYear();
 }
 
+function wireFileDrop(triggerId, inputId, nameId) {
+  const trigger = document.getElementById(triggerId);
+  const input = document.getElementById(inputId);
+  const nameEl = document.getElementById(nameId);
+  trigger.onclick = () => input.click();
+  input.addEventListener("change", () => {
+    nameEl.textContent = input.files.length ? input.files[0].name : "No file chosen";
+  });
+}
+
+function countClass(n, positiveClass) {
+  return n > 0 ? positiveClass : "count-zero";
+}
+
 // ---- Uploads ----
 async function refreshUploads() {
   const uploads = await api("/api/uploads");
+  const pill = document.getElementById("pill-uploads");
+  pill.textContent = uploads.length || "";
+  pill.dataset.count = uploads.length;
+
   const tbody = document.querySelector("#uploads-table tbody");
   tbody.innerHTML = uploads.map(u => `
-    <tr data-id="${u.id}" class="upload-row" style="cursor:pointer">
-      <td>${u.id}</td><td>${u.upload_type}</td><td>${u.branch_id ?? "-"}</td>
-      <td>${u.period_year ? `${MONTH_NAMES[u.period_month - 1].slice(0,3)} ${u.period_year}` : "-"}</td>
+    <tr data-id="${u.id}" class="clickable">
+      <td class="id-col">${u.id}</td><td class="strong">${u.upload_type}</td><td>${u.branch_id ? branchName(u.branch_id) : "-"}</td>
+      <td class="num">${u.period_year ? `${MONTH_NAMES[u.period_month - 1].slice(0,3)} ${u.period_year}` : "-"}</td>
       <td>${u.original_filename}</td>
       <td><span class="status-pill status-${u.status}">${u.status}</span></td>
-      <td>${u.rows_accepted}/${u.total_rows}</td><td>${u.rows_rejected}</td><td>${u.warning_rows}</td>
-      <td>${new Date(u.uploaded_at).toLocaleString()}</td>
+      <td class="num">${u.rows_accepted}</td>
+      <td class="num ${countClass(u.rows_rejected, "count-positive")}">${u.rows_rejected}</td>
+      <td class="num ${countClass(u.warning_rows, "count-warning")}">${u.warning_rows}</td>
+      <td class="muted" style="white-space:nowrap">${new Date(u.uploaded_at).toLocaleString()}</td>
     </tr>`).join("");
-  tbody.querySelectorAll(".upload-row").forEach(row => {
+  tbody.querySelectorAll("tr[data-id]").forEach(row => {
     row.onclick = () => showUploadDetail(row.dataset.id);
   });
+  document.getElementById("uploads-foot").textContent =
+    uploads.length ? "click a row for accepted, rejected and warning detail" : "No uploads yet.";
 }
 
 async function showUploadDetail(id) {
   const u = await api(`/api/uploads/${id}`);
+  renderUploadDetail(u, "rejected");
+}
+
+function exportRowsCsv(rows, filename) {
+  const header = ["Row", "Severity", "Column", "Message"];
+  const csvRows = [header, ...rows.map(e => [e.row_number ?? "", e.severity, e.column_name ?? "", (e.message || "").replace(/"/g, '""')])];
+  const csv = csvRows.map(r => r.map(v => `"${v}"`).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function renderUploadDetail(u, activeTabKey) {
   const el = document.getElementById("upload-detail");
-  if (!u.errors || u.errors.length === 0) {
-    el.innerHTML = `<p><b>Upload #${u.id}</b>: no errors or warnings.</p>`;
-    return;
+  const errors = u.errors || [];
+  const rejected = errors.filter(e => e.severity === "ERROR");
+  const warnings = errors.filter(e => e.severity === "WARNING");
+  const periodLabel = u.period_year ? `${MONTH_NAMES[u.period_month - 1].slice(0, 3)} ${u.period_year}` : "-";
+
+  const tabs = [
+    { key: "rejected", label: `Rejected rows (${rejected.length})`, rows: rejected },
+    { key: "warnings", label: `Warnings (${warnings.length})`, rows: warnings },
+    { key: "accepted", label: `Accepted (${u.rows_accepted})`, rows: null },
+  ];
+  const active = tabs.find(t => t.key === activeTabKey) || tabs[0];
+
+  let bodyHtml;
+  if (active.key === "accepted") {
+    bodyHtml = `<div style="padding:22px; color:#7A756A; font-size:13.5px;">Accepted rows aren't listed individually here - see the Accepted count above; they're stored in the branch/business records this upload updated.</div>`;
+  } else if (active.rows.length === 0) {
+    bodyHtml = `<div style="padding:22px; color:#7A756A; font-size:13.5px;">None.</div>`;
+  } else {
+    bodyHtml = `<div class="table-wrap"><table style="min-width:760px; margin-top:12px">
+      <thead><tr><th>Row</th><th>Severity</th><th>Column</th><th>Message</th></tr></thead>
+      <tbody>${active.rows.map(e => `<tr>
+        <td class="id-col">${e.row_number || "(file/sheet)"}</td>
+        <td><span class="badge severity-${e.severity}">${e.severity}</span></td>
+        <td>${e.column_name ?? ""}</td>
+        <td class="muted">${e.message}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>`;
   }
-  el.innerHTML = `<p><b>Upload #${u.id} issues</b> (${u.errors.length}):</p><table><thead><tr><th>Row</th><th>Severity</th><th>Column</th><th>Message</th></tr></thead><tbody>` +
-    u.errors.map(e => `<tr><td>${e.row_number || "(file/sheet)"}</td><td class="severity-${e.severity}">${e.severity}</td><td>${e.column_name ?? ""}</td><td>${e.message}</td></tr>`).join("") +
-    `</tbody></table>`;
+
+  el.innerHTML = `
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head" style="border-bottom:2px solid rgba(20,19,16,0.4); align-items:flex-start;">
+        <div>
+          <div style="font-size:11px; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:#7A756A">Upload #${u.id} · ${u.upload_type} · ${periodLabel}</div>
+          <h2 style="font-size:20px; margin-top:5px">${u.original_filename}</h2>
+        </div>
+        <button class="secondary" id="upload-detail-close">Close</button>
+      </div>
+      <div class="stat-strip">
+        <div class="stat-cell"><div class="stat-label">Rows read</div><div class="stat-figure">${u.total_rows}</div></div>
+        <div class="stat-cell success"><div class="stat-label">Accepted</div><div class="stat-figure">${u.rows_accepted}</div></div>
+        <div class="stat-cell error"><div class="stat-label">Rejected</div><div class="stat-figure">${u.rows_rejected}</div></div>
+        <div class="stat-cell warn"><div class="stat-label">Warnings</div><div class="stat-figure">${u.warning_rows}</div></div>
+      </div>
+      <div class="tabstrip">${tabs.map(t => `<button data-tab-key="${t.key}" class="${t.key === active.key ? "active" : ""}">${t.label}</button>`).join("")}</div>
+      ${bodyHtml}
+      <div class="panel-foot">
+        <div>Rejected rows are not stored. Correct the sheet and re-upload - the period upserts, it will not duplicate.</div>
+        <button class="secondary" id="upload-detail-export">Download rejected rows (.csv)</button>
+      </div>
+    </div>`;
+
+  el.querySelectorAll("[data-tab-key]").forEach(btn => { btn.onclick = () => renderUploadDetail(u, btn.dataset.tabKey); });
+  document.getElementById("upload-detail-close").onclick = () => { el.innerHTML = ""; };
+  document.getElementById("upload-detail-export").onclick = () => exportRowsCsv(rejected, `upload_${u.id}_rejected_rows.csv`);
 }
 
 function submitSummary(u) {
@@ -139,7 +260,7 @@ function submitSummary(u) {
 
 async function uploadBranchManagerFile() {
   const fileInput = document.getElementById("bm-file");
-  if (!fileInput.files.length) return flash("Choose a file first", "err");
+  if (!fileInput.files.length) return flash("Select an .xlsx or .xls file before uploading.", "err");
   const fd = new FormData();
   fd.append("file", fileInput.files[0]);
   fd.append("period_month", document.getElementById("bm-period-month").value);
@@ -156,7 +277,7 @@ async function uploadBranchManagerFile() {
 
 async function uploadBusinessManagerFile() {
   const fileInput = document.getElementById("bz-file");
-  if (!fileInput.files.length) return flash("Choose a file first", "err");
+  if (!fileInput.files.length) return flash("Select an .xlsx or .xls file before uploading.", "err");
   const fd = new FormData();
   fd.append("file", fileInput.files[0]);
   fd.append("period_month", document.getElementById("bz-period-month").value);
@@ -175,13 +296,17 @@ async function refreshRuns() {
   const tbody = document.querySelector("#runs-table tbody");
   tbody.innerHTML = runs.map(r => {
     const actions = [];
-    if (r.status === "DRAFT") actions.push(`<button class="secondary" onclick="calcRun(${r.id})">Calculate</button>`);
-    if (hasPerm("REVIEW_COMMISSION_RUN") && r.status === "DRAFT") actions.push(`<button class="secondary" onclick="reviewRun(${r.id})">Review</button>`);
-    if (hasPerm("LOCK_COMMISSION_RUN") && r.status === "REVIEWED") actions.push(`<button onclick="lockRun(${r.id})">Lock</button>`);
-    if (hasPerm("MARK_RUN_PAID") && r.status === "LOCKED") actions.push(`<button class="secondary" onclick="markPaidRun(${r.id})">Mark Paid</button>`);
-    actions.push(`<button class="secondary" onclick="downloadRun(${r.id})">Download</button>`);
-    return `<tr><td>${r.id}</td><td>${r.run_type}</td><td>${r.branch_id ?? "-"}</td><td>${r.period}</td>
-      <td><span class="status-pill status-${r.status}">${r.status}</span></td><td>${actions.join(" ")}</td></tr>`;
+    if (r.status === "DRAFT") actions.push(`<button class="link" onclick="calcRun(${r.id})">Calculate</button>`);
+    if (hasPerm("REVIEW_COMMISSION_RUN") && r.status === "DRAFT") actions.push(`<button class="link" onclick="reviewRun(${r.id})">Mark reviewed</button>`);
+    if (hasPerm("LOCK_COMMISSION_RUN") && r.status === "REVIEWED") actions.push(`<button class="link" onclick="lockRun(${r.id})">Lock run</button>`);
+    if (hasPerm("MARK_RUN_PAID") && r.status === "LOCKED") actions.push(`<button class="link" onclick="markPaidRun(${r.id})">Mark paid</button>`);
+    actions.push(`<button class="link" onclick="downloadRun(${r.id})">Export .xlsx</button>`);
+    return `<tr>
+      <td class="id-col">${r.id}</td><td class="strong">${r.run_type}</td><td>${r.branch_id ? branchName(r.branch_id) : "All branches"}</td>
+      <td class="num">${r.period}</td>
+      <td><span class="status-pill status-${r.status}">${r.status}</span></td>
+      <td><div class="action-links">${actions.join('<span class="sep">·</span>')}</div></td>
+    </tr>`;
   }).join("");
 }
 
@@ -227,6 +352,15 @@ function downloadRun(id) {
 }
 
 // ---- Exceptions ----
+async function refreshSidebarExceptionsPill() {
+  try {
+    const rows = await api("/api/exceptions");
+    const pill = document.getElementById("pill-exceptions");
+    pill.textContent = rows.length || "";
+    pill.dataset.count = rows.length;
+  } catch (e) {}
+}
+
 async function loadExceptions() {
   const period = document.getElementById("exc-period").value.trim() || "";
   const branch_id = document.getElementById("exc-branch-select").value;
@@ -234,12 +368,21 @@ async function loadExceptions() {
   if (period) params.set("period", period);
   if (branch_id) params.set("branch_id", branch_id);
   const rows = await api(`/api/exceptions?${params.toString()}`);
+
+  const counts = { UNMATCHED_IN_BUSINESS_FILE: 0, UNMATCHED_IN_BRANCH_FILE: 0, DUPLICATE: 0, MATCHED_WITH_WARNING: 0 };
+  rows.forEach(r => { if (counts[r.match_status] !== undefined) counts[r.match_status]++; });
+  document.getElementById("stat-unmatched-biz").textContent = counts.UNMATCHED_IN_BUSINESS_FILE;
+  document.getElementById("stat-unmatched-branch").textContent = counts.UNMATCHED_IN_BRANCH_FILE;
+  document.getElementById("stat-duplicates").textContent = counts.DUPLICATE;
+  document.getElementById("stat-warnings").textContent = counts.MATCHED_WITH_WARNING;
+
   const tbody = document.querySelector("#exceptions-table tbody");
   tbody.innerHTML = rows.map(r => `<tr>
-    <td class="match-${r.match_status}">${r.match_status}</td><td>${r.branch_name ?? ""}</td><td>${r.client_name ?? ""}</td>
-    <td>${r.client_account_no_branch ?? ""}</td><td>${r.client_account_no_business ?? ""}</td>
-    <td>${r.dsa_code ?? ""} ${r.dsa_name ?? ""}</td><td>${r.loan_type ?? ""}</td><td>${r.disbursement_date ?? ""}</td>
-    <td>${r.notes ?? ""}</td></tr>`).join("");
+    <td><span class="badge match-${r.match_status}">${r.match_status}</span></td><td>${r.branch_name ?? ""}</td><td>${r.client_name ?? ""}</td>
+    <td class="num ${r.client_account_no_branch ? "" : "count-positive"}">${r.client_account_no_branch ?? "—"}</td>
+    <td class="num ${r.client_account_no_business ? "" : "count-positive"}">${r.client_account_no_business ?? "—"}</td>
+    <td>${r.dsa_code ?? ""} ${r.dsa_name ?? ""}</td><td>${r.loan_type ?? ""}</td><td class="num" style="white-space:nowrap">${r.disbursement_date ?? ""}</td>
+    <td class="muted">${r.notes ?? ""}</td></tr>`).join("");
 }
 function downloadExceptions() {
   const period = document.getElementById("exc-period").value.trim();
@@ -258,6 +401,8 @@ function downloadExceptions() {
 function switchAdminSection(name) {
   document.querySelectorAll("#admin-subnav button").forEach(b => b.classList.toggle("active", b.dataset.adminSection === name));
   document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("hidden", s.id !== `admin-section-${name}`));
+  const meta = PAGE_META.admin[name];
+  if (meta) setPageHeader(meta.crumb, meta.title);
   if (name === "users") refreshUsers();
   if (name === "roles") refreshRoles();
   if (name === "branches") refreshAdminBranches();
@@ -278,7 +423,8 @@ async function refreshUsers() {
 
   const users = await api("/api/admin/users");
   document.querySelector("#admin-users-table tbody").innerHTML =
-    users.map(u => `<tr><td>${u.id}</td><td>${u.email}</td><td>${u.full_name}</td><td>${u.role_name}</td><td>${u.branch_id ? branchName(u.branch_id) : ""}</td></tr>`).join("");
+    users.map(u => `<tr><td class="id-col">${u.id}</td><td>${u.email}</td><td class="strong">${u.full_name}</td>
+      <td><span class="status-pill role-badge">${u.role_name}</span></td><td>${u.branch_id ? branchName(u.branch_id) : ""}</td></tr>`).join("");
 }
 
 async function createUser() {
@@ -309,12 +455,12 @@ async function loadPermissionCatalog() {
 async function refreshRoles() {
   state.roles = await api("/api/admin/roles");
   document.querySelector("#admin-roles-table tbody").innerHTML = state.roles.map(r => {
-    const perms = r.permissions.slice(0, 4).map(p => `<span class="pill">${p}</span>`).join("");
-    const more = r.permissions.length > 4 ? `<span class="pill">+${r.permissions.length - 4} more</span>` : "";
+    const chips = r.permissions.map(p => `<span class="perm-chip">${p}</span>`).join("");
     const actions = [`<button class="link" onclick="openRoleForm(${r.id})">Edit</button>`];
     if (!r.is_system_role) actions.push(`<button class="link" onclick="deleteRole(${r.id})">Delete</button>`);
-    return `<tr><td>${r.name}</td><td>${r.description ?? ""}</td><td>${perms}${more} (${r.permission_count})</td>
-      <td>${r.is_system_role ? "Yes" : "No"}</td><td>${actions.join(" ")}</td></tr>`;
+    return `<tr><td class="strong" style="white-space:nowrap">${r.name}</td><td class="muted">${r.description ?? ""}</td>
+      <td><div class="chip-row">${chips}</div></td>
+      <td>${r.is_system_role ? "Yes" : "No"}</td><td style="white-space:nowrap">${actions.join(" ")}</td></tr>`;
   }).join("");
 }
 
@@ -375,7 +521,7 @@ async function deleteRole(id) {
 async function refreshAdminBranches() {
   const branches = await api("/api/admin/branches");
   document.querySelector("#admin-branches-table tbody").innerHTML =
-    branches.map(b => `<tr><td>${b.id}</td><td>${b.name}</td><td>${b.code ?? ""}</td></tr>`).join("");
+    branches.map(b => `<tr><td class="id-col">${b.id}</td><td class="strong">${b.name}</td><td class="mono">${b.code ?? ""}</td></tr>`).join("");
 }
 
 async function createBranch() {
@@ -397,7 +543,7 @@ async function createBranch() {
 async function refreshDtls() {
   const dtls = await api("/api/admin/dtls");
   document.querySelector("#admin-dtls-table tbody").innerHTML =
-    dtls.map(d => `<tr><td>${d.dtl_code}</td><td>${d.dtl_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td></tr>`).join("");
+    dtls.map(d => `<tr><td class="mono">${d.dtl_code}</td><td class="strong">${d.dtl_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td></tr>`).join("");
 }
 
 async function createDtl() {
@@ -422,7 +568,7 @@ async function createDtl() {
 async function refreshDsas() {
   const dsas = await api("/api/admin/dsas");
   document.querySelector("#admin-dsas-table tbody").innerHTML = dsas.map(d => `
-    <tr><td>${d.dsa_code}</td><td>${d.dsa_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td>
+    <tr><td class="mono">${d.dsa_code}</td><td class="strong">${d.dsa_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td>
       <td>${d.current_dtl_name ? `${d.current_dtl_code} - ${d.current_dtl_name}` : "(unassigned)"}</td>
       <td><button class="link" onclick='openDsaForm(${JSON.stringify(d).replace(/'/g, "&apos;")})'>Edit</button></td>
     </tr>`).join("");
@@ -477,17 +623,21 @@ async function saveDsa() {
 
 // ---- Tabs & wiring ----
 function switchTab(name) {
-  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll("#top-nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("hidden", t.id !== `tab-${name}`));
   if (name === "admin") {
     const first = firstVisibleAdminSection();
     if (first) switchAdminSection(first);
+  } else {
+    document.querySelectorAll("#admin-subnav button").forEach(b => b.classList.remove("active"));
+    const meta = PAGE_META[name];
+    if (meta) setPageHeader(meta.crumb, meta.title);
   }
 }
 
 document.getElementById("login-btn").onclick = login;
 document.getElementById("login-password").addEventListener("keydown", e => { if (e.key === "Enter") login(); });
-document.querySelectorAll("nav button").forEach(b => b.onclick = () => switchTab(b.dataset.tab));
+document.querySelectorAll("#top-nav button").forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 document.getElementById("bm-upload-btn").onclick = uploadBranchManagerFile;
 document.getElementById("bz-upload-btn").onclick = uploadBusinessManagerFile;
 document.getElementById("refresh-uploads").onclick = refreshUploads;
@@ -496,7 +646,7 @@ document.getElementById("refresh-runs").onclick = refreshRuns;
 document.getElementById("exc-load-btn").onclick = loadExceptions;
 document.getElementById("exc-download-btn").onclick = downloadExceptions;
 
-document.querySelectorAll("#admin-subnav button").forEach(b => b.onclick = () => switchAdminSection(b.dataset.adminSection));
+document.querySelectorAll("#admin-subnav button").forEach(b => b.onclick = () => { switchTab("admin"); switchAdminSection(b.dataset.adminSection); });
 
 document.getElementById("toggle-user-form").onclick = () => document.getElementById("user-form").classList.toggle("hidden");
 document.getElementById("user-form-save").onclick = createUser;
@@ -516,8 +666,17 @@ document.getElementById("dsa-form-save").onclick = saveDsa;
 document.getElementById("dsa-form-cancel").onclick = () => document.getElementById("dsa-form").classList.add("hidden");
 document.getElementById("dsa-form-branch").onchange = (e) => dsaFormLoadDtls(e.target.value || null, null);
 
+wireFileDrop("bm-file-trigger", "bm-file", "bm-file-name");
+wireFileDrop("bz-file-trigger", "bz-file", "bz-file-name");
+
 populatePeriodSelects("bm-period-month", "bm-period-year");
 populatePeriodSelects("bz-period-month", "bz-period-year");
+
+(function initLoginStats() {
+  const now = new Date();
+  const el = document.getElementById("login-stat-period");
+  if (el) el.textContent = `${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}`;
+})();
 
 const saved = localStorage.getItem("dsa_token");
 if (saved) { state.token = saved; afterLogin().catch(() => logout()); }
