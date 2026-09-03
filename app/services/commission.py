@@ -87,7 +87,7 @@ def calculate_commission_run(db: Session, run: CommissionRun) -> CalculationResu
     while the run is still DRAFT - existing lines for this run are replaced.
     """
     if run.status != RunStatus.DRAFT:
-        raise CommissionRunError(f"Cannot calculate a run in status {run.status}; only DRAFT runs can be (re)calculated.")
+        raise CommissionRunError(f"Cannot calculate a run in status {run.status.value}; only DRAFT runs can be (re)calculated.")
 
     # Wipe and recompute this run's own lines (idempotent while DRAFT).
     db.query(CommissionLine).filter(CommissionLine.commission_run_id == run.id).delete()
@@ -191,7 +191,7 @@ def calculate_commission_run(db: Session, run: CommissionRun) -> CalculationResu
 
 def review_run(db: Session, run: CommissionRun, reviewer_user_id: int) -> CommissionRun:
     if run.status != RunStatus.DRAFT:
-        raise CommissionRunError(f"Cannot review a run in status {run.status}")
+        raise CommissionRunError(f"Cannot review a run in status {run.status.value}")
     run.status = RunStatus.REVIEWED
     run.reviewed_by_user_id = reviewer_user_id
     run.reviewed_at = dt.datetime.now(dt.timezone.utc)
@@ -204,7 +204,7 @@ def lock_run(db: Session, run: CommissionRun, locker_user_id: int) -> Commission
     mutated - corrections go through commission_adjustments on a later run.
     """
     if run.status != RunStatus.REVIEWED:
-        raise CommissionRunError(f"Cannot lock a run in status {run.status}; it must be REVIEWED first.")
+        raise CommissionRunError(f"Cannot lock a run in status {run.status.value}; it must be REVIEWED first.")
     run.status = RunStatus.LOCKED
     run.locked_by_user_id = locker_user_id
     run.locked_at = dt.datetime.now(dt.timezone.utc)
@@ -214,7 +214,7 @@ def lock_run(db: Session, run: CommissionRun, locker_user_id: int) -> Commission
 
 def mark_paid(db: Session, run: CommissionRun) -> CommissionRun:
     if run.status != RunStatus.LOCKED:
-        raise CommissionRunError(f"Cannot mark a run PAID from status {run.status}; it must be LOCKED first.")
+        raise CommissionRunError(f"Cannot mark a run PAID from status {run.status.value}; it must be LOCKED first.")
     run.status = RunStatus.PAID
     run.paid_at = dt.datetime.now(dt.timezone.utc)
     db.flush()

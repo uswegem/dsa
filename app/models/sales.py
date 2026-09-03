@@ -40,6 +40,7 @@ class BranchSale(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     matches: Mapped[list["MatchedTransaction"]] = relationship(back_populates="branch_sale")
+    branch = relationship("Branch")
 
 
 class BusinessTransaction(Base):

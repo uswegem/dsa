@@ -99,6 +99,42 @@ def test_matching_classifies_all_four_statuses(db_session):
     assert matched.commission_period == "2026-08"
 
 
+def test_unmatched_rows_are_re_resolved_when_the_other_file_arrives_later(db_session):
+    """Regression test: the two files are uploaded independently, often far
+    apart. A branch sale that's UNMATCHED_IN_BUSINESS_FILE today must still
+    get paired up once the business transaction shows up in a later upload -
+    that classification must never be treated as permanent."""
+    db = db_session
+    branch, dsa, dtl, admin, branch_upload, biz_upload = _seed_base(db)
+
+    db.add(BranchSale(
+        upload_id=branch_upload.id, branch_id=branch.id, row_number=2, loan_date=dt.date(2026, 8, 5),
+        client_name="Client A", client_check_no="871", client_account_no="ACC001",
+        dsa_code="DSA01", dsa_name="Amos", dtl_code="DTL01", dtl_name="Grace T",
+    ))
+    db.flush()
+
+    # First matching pass: only the branch file has landed so far.
+    run_matching(db, branch_upload_id=branch_upload.id, business_upload_id=None)
+    db.flush()
+    mt = db.query(MatchedTransaction).one()
+    assert mt.match_status == MatchStatus.UNMATCHED_IN_BUSINESS_FILE
+
+    # The business file arrives later, in a separate upload.
+    db.add(BusinessTransaction(
+        upload_id=biz_upload.id, row_number=2, branch_name_raw="Arusha", employee_no="871",
+        loan_type=LoanType.NL, disbursement_date=dt.date(2026, 8, 5), disbursement_amt=1_000_000,
+        client_disb_ext_account_no="ACC001",
+    ))
+    db.flush()
+    run_matching(db, branch_upload_id=None, business_upload_id=biz_upload.id)
+    db.flush()
+
+    mt = db.query(MatchedTransaction).one()
+    assert mt.match_status == MatchStatus.MATCHED
+    assert mt.commission_period == "2026-08"
+
+
 def test_commission_calculation_rates_and_exclusions(db_session):
     db = db_session
     branch, dsa, dtl, admin, branch_upload, biz_upload = _seed_base(db)

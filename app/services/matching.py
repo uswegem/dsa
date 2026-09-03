@@ -42,21 +42,41 @@ def _commission_period(disbursement_date: dt.date) -> str:
 def run_matching(db: Session, branch_upload_id: int | None, business_upload_id: int | None) -> MatchRunResult:
     """Match BranchSale rows against BusinessTransaction rows.
 
-    Matching is run pairwise across ALL not-yet-matched branch_sales and
+    Matching is run pairwise across ALL unresolved branch_sales and
     business_transactions (not scoped to a single upload pair) because the
     two files are uploaded independently and a branch sale from an earlier
     upload may only find its counterpart once a later business file lands
-    (or vice versa). Rows already attached to a MatchedTransaction are left
-    alone - re-running matching is safe to call after every new upload.
+    (or vice versa).
+
+    Only a real pairing (MATCHED / MATCHED_WITH_WARNING / DUPLICATE) counts
+    as "resolved" and is left alone on re-runs. UNMATCHED_IN_BUSINESS_FILE
+    and UNMATCHED_IN_BRANCH_FILE are NOT terminal - they just mean "no
+    counterpart yet" - so those rows are cleared and re-derived from
+    scratch every time, letting a later upload retroactively pair them.
     """
     result = MatchRunResult()
 
+    RESOLVED_STATUSES = (MatchStatus.MATCHED, MatchStatus.MATCHED_WITH_WARNING, MatchStatus.DUPLICATE)
+
+    db.query(MatchedTransaction).filter(
+        MatchedTransaction.match_status.in_(
+            (MatchStatus.UNMATCHED_IN_BUSINESS_FILE, MatchStatus.UNMATCHED_IN_BRANCH_FILE)
+        )
+    ).delete(synchronize_session=False)
+    db.flush()
+    db.expire_all()  # clear any stale identity-mapped rows/relationships from the bulk delete above
+
     already_matched_branch_ids = {
-        m.branch_sale_id for m in db.query(MatchedTransaction).filter(MatchedTransaction.branch_sale_id.isnot(None))
+        m.branch_sale_id
+        for m in db.query(MatchedTransaction).filter(
+            MatchedTransaction.branch_sale_id.isnot(None), MatchedTransaction.match_status.in_(RESOLVED_STATUSES)
+        )
     }
     already_matched_biz_ids = {
         m.business_transaction_id
-        for m in db.query(MatchedTransaction).filter(MatchedTransaction.business_transaction_id.isnot(None))
+        for m in db.query(MatchedTransaction).filter(
+            MatchedTransaction.business_transaction_id.isnot(None), MatchedTransaction.match_status.in_(RESOLVED_STATUSES)
+        )
     }
 
     branch_sales = (
