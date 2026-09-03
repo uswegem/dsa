@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DSA/DTL Commission App</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Letshego Faidika Bank &mdash; DSA/DTL Commission App</h1>
+    <div id="userbox"></div>
+  </header>
+
+  <div id="login-screen">
+    <main style="max-width:400px;">
+      <section class="panel">
+        <h2>Sign in</h2>
+        <div id="login-flash"></div>
+        <label>Email</label>
+        <input id="login-email" type="email" style="width:100%" />
+        <label>Password</label>
+        <input id="login-password" type="password" style="width:100%" />
+        <div style="margin-top:16px;"><button id="login-btn" style="width:100%">Sign in</button></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="app-screen" class="hidden">
+    <nav id="tabs">
+      <button data-tab="uploads" class="active">Uploads</button>
+      <button data-tab="runs">Commission Runs</button>
+      <button data-tab="exceptions">Exceptions</button>
+      <button data-tab="admin">Admin</button>
+    </nav>
+    <main>
+      <div id="flash"></div>
+
+      <section id="tab-uploads" class="tab">
+        <div class="row">
+          <div class="panel" id="panel-branch-upload">
+            <h2>Upload Branch Manager File (roster)</h2>
+            <label>Branch (admin only)</label>
+            <select id="bm-branch-select"></select>
+            <label>File (.xlsx)</label>
+            <input id="bm-file" type="file" accept=".xlsx,.xls" />
+            <div style="margin-top:12px;"><button id="bm-upload-btn">Upload</button></div>
+          </div>
+          <div class="panel" id="panel-business-upload">
+            <h2>Upload Business Manager File (payout report)</h2>
+            <label>File (.xlsx)</label>
+            <input id="bz-file" type="file" accept=".xlsx,.xls" />
+            <div style="margin-top:12px;"><button id="bz-upload-btn">Upload</button></div>
+          </div>
+        </div>
+        <section class="panel">
+          <h2>Recent Uploads</h2>
+          <button class="secondary" id="refresh-uploads">Refresh</button>
+          <table id="uploads-table">
+            <thead><tr><th>ID</th><th>Type</th><th>Branch</th><th>Filename</th><th>Status</th><th>Rows</th><th>Errors</th><th>Warnings</th><th>Uploaded</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="upload-detail"></div>
+        </section>
+      </section>
+
+      <section id="tab-runs" class="tab hidden">
+        <section class="panel">
+          <h2>Create Commission Run</h2>
+          <div class="row">
+            <div>
+              <label>Type</label>
+              <select id="run-type"><option value="ORG_WIDE">ORG_WIDE (all branches)</option><option value="BRANCH">BRANCH</option></select>
+              <label>Branch (BRANCH runs only)</label>
+              <select id="run-branch-select"></select>
+              <label>Period (YYYY-MM)</label>
+              <input id="run-period" placeholder="2026-08" />
+              <div style="margin-top:12px;"><button id="create-run-btn">Create Run</button></div>
+            </div>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>Commission Runs</h2>
+          <button class="secondary" id="refresh-runs">Refresh</button>
+          <table id="runs-table">
+            <thead><tr><th>ID</th><th>Type</th><th>Branch</th><th>Period</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section id="tab-exceptions" class="tab hidden">
+        <section class="panel">
+          <h2>Exceptions</h2>
+          <small class="hint">Unmatched, duplicate, and match-quality-warning rows. These block nothing but must be reviewed before a run is locked.</small>
+          <div class="row" style="margin-top:10px;">
+            <div>
+              <label>Period (YYYY-MM, optional)</label>
+              <input id="exc-period" placeholder="2026-08" />
+            </div>
+            <div>
+              <label>Branch (admin/business manager only)</label>
+              <select id="exc-branch-select"></select>
+            </div>
+          </div>
+          <div style="margin-top:12px;">
+            <button id="exc-load-btn">Load</button>
+            <button class="secondary" id="exc-download-btn">Download Exceptions (.xlsx)</button>
+          </div>
+          <table id="exceptions-table">
+            <thead><tr><th>Category</th><th>Branch</th><th>Client</th><th>Acct (Branch)</th><th>Acct (Business)</th><th>DSA</th><th>Loan Type</th><th>Disb. Date</th><th>Notes</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section id="tab-admin" class="tab hidden">
+        <div class="row">
+          <div class="panel">
+            <h2>New Branch</h2>
+            <label>Name</label><input id="admin-branch-name" />
+            <label>Code</label><input id="admin-branch-code" />
+            <div style="margin-top:12px;"><button id="admin-create-branch">Create</button></div>
+          </div>
+          <div class="panel">
+            <h2>New DTL</h2>
+            <label>DTL Code</label><input id="admin-dtl-code" />
+            <label>DTL Name</label><input id="admin-dtl-name" />
+            <div style="margin-top:12px;"><button id="admin-create-dtl">Create</button></div>
+          </div>
+        </div>
+        <section class="panel">
+          <h2>New User</h2>
+          <div class="row">
+            <div>
+              <label>Email</label><input id="admin-user-email" type="email" />
+              <label>Full name</label><input id="admin-user-name" />
+              <label>Password</label><input id="admin-user-password" type="password" />
+              <label>Role</label>
+              <select id="admin-user-role">
+                <option value="BRANCH_MANAGER">BRANCH_MANAGER</option>
+                <option value="BUSINESS_MANAGER">BUSINESS_MANAGER</option>
+                <option value="ADMIN">ADMIN</option>
+              </select>
+              <label>Branch (for BRANCH_MANAGER)</label>
+              <select id="admin-user-branch-select"></select>
+              <div style="margin-top:12px;"><button id="admin-create-user">Create User</button></div>
+            </div>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>Branches</h2>
+          <table id="admin-branches-table"><thead><tr><th>ID</th><th>Name</th><th>Code</th></tr></thead><tbody></tbody></table>
+        </section>
+        <section class="panel">
+          <h2>Users</h2>
+          <table id="admin-users-table"><thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Branch</th></tr></thead><tbody></tbody></table>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
