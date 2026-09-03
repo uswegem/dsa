@@ -9,6 +9,13 @@ seen in that upload (falling back to the upload's date if loan_date is
 missing everywhere). If a DSA's DTL changes, the previous open-ended
 assignment is closed the day before the new one starts; it is never deleted
 or mutated in a way that would change a past commission_period's supervisor.
+
+PENDING- placeholder codes: some DTLs were seeded from a name-only
+reference list with no DTL_CODE available, using generated codes of the
+form "PENDING-001". The first time a real Branch Manager upload carries an
+actual DTL_CODE for a name that currently only has a PENDING- code (same
+name, same branch), upsert_dtl() adopts the real code onto that existing
+record instead of creating a duplicate Dtl row for the same person.
 """
 import datetime as dt
 
@@ -35,15 +42,41 @@ def upsert_dsa(db: Session, dsa_code: str, dsa_name: str, dsa_account_no: str | 
     return dsa
 
 
-def upsert_dtl(db: Session, dtl_code: str, dtl_name: str) -> Dtl:
+PENDING_CODE_PREFIX = "PENDING-"
+
+
+def upsert_dtl(db: Session, dtl_code: str, dtl_name: str, branch_id: int | None = None) -> Dtl:
     dtl = db.query(Dtl).filter(Dtl.dtl_code == dtl_code).first()
-    if dtl is None:
-        dtl = Dtl(dtl_code=dtl_code, dtl_name=dtl_name)
-        db.add(dtl)
+    if dtl is not None:
+        if dtl.dtl_name != dtl_name:
+            dtl.dtl_name = dtl_name
+        if branch_id and not dtl.branch_id:
+            dtl.branch_id = branch_id
         db.flush()
-    elif dtl.dtl_name != dtl_name:
-        dtl.dtl_name = dtl_name
+        return dtl
+
+    # No record with this exact code exists yet. Before creating a new one,
+    # check whether this is really an already-known DTL whose code is only
+    # a PENDING- placeholder - if so, adopt the real code onto that record
+    # rather than creating a duplicate for the same person. Matched by name
+    # (case-insensitive) and, when known, branch.
+    placeholder_query = db.query(Dtl).filter(
+        Dtl.dtl_code.startswith(PENDING_CODE_PREFIX),
+        Dtl.dtl_name.ilike(dtl_name.strip()),
+    )
+    if branch_id is not None:
+        placeholder_query = placeholder_query.filter((Dtl.branch_id == branch_id) | (Dtl.branch_id.is_(None)))
+    placeholder = placeholder_query.first()
+    if placeholder is not None:
+        placeholder.dtl_code = dtl_code
+        if branch_id:
+            placeholder.branch_id = branch_id
         db.flush()
+        return placeholder
+
+    dtl = Dtl(dtl_code=dtl_code, dtl_name=dtl_name, branch_id=branch_id)
+    db.add(dtl)
+    db.flush()
     return dtl
 
 
@@ -75,6 +108,6 @@ def sync_roster_from_branch_sales(db: Session, branch_sale_rows: list, upload_da
     for row in branch_sale_rows:
         dsa = upsert_dsa(db, row.dsa_code, row.dsa_name, row.dsa_account_no, row.branch_id)
         if row.dtl_code and row.dtl_name:
-            dtl = upsert_dtl(db, row.dtl_code, row.dtl_name)
+            dtl = upsert_dtl(db, row.dtl_code, row.dtl_name, branch_id=row.branch_id)
             effective_from = row.loan_date or upload_date
             sync_assignment(db, dsa, dtl, effective_from)

@@ -32,8 +32,17 @@ class Dtl(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     dtl_code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     dtl_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Not in the original Branch Manager file schema (a DTL's branch is
+    # otherwise only implied through the DSAs currently assigned to them).
+    # Added on request to record it directly, e.g. from an org chart /
+    # roster reference list that isn't itself an upload.
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"))
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    branch = relationship("Branch")
 
     assignments: Mapped[list["DsaDtlAssignment"]] = relationship(back_populates="dtl")
 

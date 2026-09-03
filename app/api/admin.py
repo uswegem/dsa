@@ -4,9 +4,9 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import require_admin
 from app.core.security import hash_password
-from app.models import Branch, Dtl, User
+from app.models import Branch, Dsa, Dtl, User
 from app.schemas.auth import UserCreate, UserOut
-from app.schemas.common import BranchCreate, BranchOut, DtlCreate, DtlOut
+from app.schemas.common import BranchCreate, BranchOut, DsaOut, DtlCreate, DtlOut
 from app.services.audit import log_action
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -32,7 +32,7 @@ def list_branches(db: Session = Depends(get_db)):
 def create_dtl(payload: DtlCreate, db: Session = Depends(get_db)):
     if db.query(Dtl).filter(Dtl.dtl_code == payload.dtl_code).first():
         raise HTTPException(status.HTTP_409_CONFLICT, "DTL with this code already exists")
-    dtl = Dtl(dtl_code=payload.dtl_code, dtl_name=payload.dtl_name)
+    dtl = Dtl(dtl_code=payload.dtl_code, dtl_name=payload.dtl_name, branch_id=payload.branch_id)
     db.add(dtl)
     db.commit()
     db.refresh(dtl)
@@ -40,8 +40,19 @@ def create_dtl(payload: DtlCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/dtls", response_model=list[DtlOut])
-def list_dtls(db: Session = Depends(get_db)):
-    return db.query(Dtl).order_by(Dtl.dtl_name).all()
+def list_dtls(branch_id: int | None = None, db: Session = Depends(get_db)):
+    q = db.query(Dtl)
+    if branch_id is not None:
+        q = q.filter(Dtl.branch_id == branch_id)
+    return q.order_by(Dtl.dtl_name).all()
+
+
+@router.get("/dsas", response_model=list[DsaOut])
+def list_dsas(branch_id: int | None = None, db: Session = Depends(get_db)):
+    q = db.query(Dsa)
+    if branch_id is not None:
+        q = q.filter(Dsa.branch_id == branch_id)
+    return q.order_by(Dsa.dsa_name).all()
 
 
 @router.post("/users", response_model=UserOut)

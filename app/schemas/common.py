@@ -18,6 +18,7 @@ class DtlOut(BaseModel):
     id: int
     dtl_code: str
     dtl_name: str
+    branch_id: int | None
 
     model_config = {"from_attributes": True}
 
@@ -25,6 +26,7 @@ class DtlOut(BaseModel):
 class DtlCreate(BaseModel):
     dtl_code: str
     dtl_name: str
+    branch_id: int | None = None
 
 
 class DsaOut(BaseModel):
