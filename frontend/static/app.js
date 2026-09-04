@@ -20,7 +20,20 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     let detail = res.statusText;
     try { const j = await res.json(); detail = j.detail || detail; } catch (e) {}
+    if (res.status === 401 && state.token) {
+      // The server rejected an authenticated call outright (revoked/expired
+      // session) - don't leave the UI acting as if it's still logged in.
+      forceSignOutToLogin(detail.toLowerCase().includes("inactivity") ? "inactivity" : null);
+    }
     throw new Error(detail);
+  }
+  // A successful authenticated call is real activity - reset the client
+  // timer and count it as a fresh server-side touch (last_seen_at was just
+  // bumped by this very request), so the next passive-activity ping isn't
+  // redundant.
+  if (state.token) {
+    armInactivityTimers();
+    lastServerPingAt = Date.now();
   }
   const ct = res.headers.get("content-type") || "";
   if (ct.includes("application/json")) return res.json();
@@ -100,10 +113,85 @@ async function afterLogin() {
   refreshSidebarExceptionsPill();
 }
 
-function logout() {
+async function logout(reason) {
+  clearInactivityTimers();
+  hideInactivityWarning();
+  try { await api("/api/auth/logout", { method: "POST" }); } catch (e) { /* best-effort - clearing locally regardless */ }
+  finishSignOut(reason === "inactivity" ? "inactivity" : null);
+}
+
+function forceSignOutToLogin(reason) {
+  // The server already rejected the token (revoked/expired) - no point
+  // calling /api/auth/logout again, just clear local state.
+  clearInactivityTimers();
+  hideInactivityWarning();
+  finishSignOut(reason);
+}
+
+function finishSignOut(reason) {
   localStorage.removeItem("dsa_token");
+  state.token = null;
+  if (reason === "inactivity") sessionStorage.setItem("dsa_logout_reason", "inactivity");
   location.reload();
 }
+
+// ---- Inactivity / auto-logout ----
+// Mirrors the backend policy in Settings.session_inactivity_minutes -
+// app/core/config.py. Any mouse/keyboard/scroll/touch event, or any
+// successful api() call, resets the clock.
+const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
+const WARNING_LEAD_MS = 60 * 1000; // show the "still there?" prompt this long before logout
+const SERVER_PING_THROTTLE_MS = 60 * 1000; // cap how often passive activity re-touches the server
+
+let inactivityDeadlineTimer = null;
+let warningShowTimer = null;
+let countdownInterval = null;
+let lastServerPingAt = 0;
+
+function clearInactivityTimers() {
+  clearTimeout(inactivityDeadlineTimer);
+  clearTimeout(warningShowTimer);
+  clearInterval(countdownInterval);
+}
+
+function armInactivityTimers() {
+  clearInactivityTimers();
+  if (!state.token) return;
+  warningShowTimer = setTimeout(showInactivityWarning, INACTIVITY_LIMIT_MS - WARNING_LEAD_MS);
+  inactivityDeadlineTimer = setTimeout(() => logout("inactivity"), INACTIVITY_LIMIT_MS);
+}
+
+function showInactivityWarning() {
+  document.getElementById("inactivity-warning").classList.remove("hidden");
+  let remaining = Math.round(WARNING_LEAD_MS / 1000);
+  const span = document.getElementById("inactivity-countdown");
+  span.textContent = remaining;
+  clearInterval(countdownInterval);
+  countdownInterval = setInterval(() => {
+    remaining -= 1;
+    span.textContent = Math.max(remaining, 0);
+    if (remaining <= 0) clearInterval(countdownInterval);
+  }, 1000);
+}
+
+function hideInactivityWarning() {
+  document.getElementById("inactivity-warning").classList.add("hidden");
+}
+
+function notePassiveActivity() {
+  if (!state.token) return;
+  hideInactivityWarning();
+  armInactivityTimers();
+  const now = Date.now();
+  if (now - lastServerPingAt > SERVER_PING_THROTTLE_MS) {
+    lastServerPingAt = now;
+    api("/api/auth/me").catch(() => {}); // cheap authenticated call, just to refresh server-side last_seen_at
+  }
+}
+
+["mousedown", "mousemove", "keydown", "wheel", "scroll", "touchstart"].forEach(evt =>
+  document.addEventListener(evt, notePassiveActivity, { passive: true })
+);
 
 async function loadBranches() {
   try {
@@ -700,10 +788,19 @@ wireFileDrop("bz-file-trigger", "bz-file", "bz-file-name");
 populatePeriodSelects("bm-period-month", "bm-period-year");
 populatePeriodSelects("bz-period-month", "bz-period-year");
 
+document.getElementById("inactivity-stay-btn").onclick = notePassiveActivity;
+
 (function initLoginStats() {
   const now = new Date();
   const el = document.getElementById("login-stat-period");
   if (el) el.textContent = `${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}`;
+})();
+
+(function showLogoutReasonIfAny() {
+  const reason = sessionStorage.getItem("dsa_logout_reason");
+  if (!reason) return;
+  sessionStorage.removeItem("dsa_logout_reason");
+  if (reason === "inactivity") flash("You were signed out due to inactivity.", "info", "login-flash");
 })();
 
 const saved = localStorage.getItem("dsa_token");

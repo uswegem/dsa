@@ -18,14 +18,23 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return _pwd_context.verify(plain_password, hashed_password)
 
 
-def create_access_token(subject: str) -> str:
-    """The token only carries identity (subject=email). Role/permissions are
-    never trusted from the token - every request re-loads the current User
-    (and their live role/permissions) from the database, so a permission
-    change takes effect immediately without waiting for re-login."""
+def create_access_token(subject: str, jti: str) -> str:
+    """The token only carries identity (subject=email) and jti - role/
+    permissions are never trusted from the token - every request re-loads
+    the current User (and their live role/permissions) from the database,
+    so a permission change takes effect immediately without waiting for
+    re-login.
+
+    jti ties this token to a UserSession row (app/models/session.py) - the
+    actual mechanism that makes logout/inactivity revocation real,
+    server-side, not just "the frontend forgot the token". Callers create
+    that row themselves (see app/api/auth.py::login) so this function stays
+    a pure token-encoder with no DB access.
+    """
     expire = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=settings.access_token_expire_minutes)
     payload = {
         "sub": subject,
+        "jti": jti,
         "exp": expire,
     }
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)

@@ -257,3 +257,11 @@ td.strong { font-weight: 500; }
   .sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 8px; }
   .sidebar-footer { display: none; }
 }
+
+/* ---------------- Inactivity warning ---------------- */
+#inactivity-warning { position: fixed; inset: 0; background: rgba(11, 11, 11, 0.55); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.inactivity-card { background: #FFFFFF; border: 1px solid var(--n300); padding: 28px 32px; max-width: 380px; text-align: center; }
+.inactivity-card h2 { margin: 0 0 10px; }
+.inactivity-card p { font-size: 13.5px; color: var(--n700); line-height: 1.5; margin: 0 0 20px; }
+.inactivity-card #inactivity-countdown { font-weight: 700; color: var(--err); font-variant-numeric: tabular-nums; }
+#inactivity-stay-btn { width: 100%; padding: 11px 18px; }

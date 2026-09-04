@@ -16,9 +16,37 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
+    # Absolute ceiling on a token's lifetime regardless of activity - a
+    # secondary safety net. The inactivity settings below are what actually
+    # governs a normal session's length; this is just a hard backstop.
     access_token_expire_minutes: int = 480
 
     upload_dir: str = "uploads"
+
+    # --- Session inactivity / auto-logout ---------------------------------
+    # This is a banking-adjacent internal tool: sessions auto-expire after a
+    # period of inactivity rather than staying live for the full absolute
+    # token lifetime above.
+    #
+    # session_inactivity_minutes is the CLIENT-FACING policy: app.js tracks
+    # mouse/keyboard/scroll/API activity, warns the user ~1 minute before
+    # this elapses, and logs them out (revoking the session server-side via
+    # POST /api/auth/logout) if nothing resets it.
+    #
+    # session_inactivity_grace_minutes is the SERVER-ENFORCED ceiling,
+    # checked on every authenticated request (app/core/deps.py) and kept
+    # slightly longer than the client policy on purpose: app.js throttles
+    # its "keep the server-side session fresh" pings to once every 60s, so
+    # a hard server cutoff at exactly 10 minutes could occasionally 401 a
+    # genuinely-active user a few seconds before their own client-side
+    # warning even had a chance to fire. The grace period absorbs that; the
+    # client-side timer is what drives the actual UX in the normal case.
+    # This also means a token used directly against the API (bypassing the
+    # frontend's timer entirely - e.g. a stolen token) can't outlive a real
+    # user's inactivity by more than this ceiling, regardless of the
+    # absolute JWT expiry above.
+    session_inactivity_minutes: int = 10
+    session_inactivity_grace_minutes: int = 12
 
     # --- Commission rates -------------------------------------------------
     # New Loan (NL): commission on GROSS sales (Disbursement Amt).

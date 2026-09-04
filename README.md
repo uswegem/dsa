@@ -253,6 +253,43 @@ All three amount columns render as real Excel currency cells
 (`number_format = "#,##0.00"`), not raw floats - applied consistently to
 every monetary column across all four sheet types, not just these two.
 
+## Sessions & auto-logout
+
+This is a banking-adjacent internal tool, so a session doesn't just sit
+valid for its full absolute JWT lifetime (`access_token_expire_minutes`,
+8h) regardless of activity - it auto-expires after inactivity, and "logged
+out" is enforced server-side, not just by the browser forgetting a token.
+
+- **`user_sessions`** (`app/models/session.py`): one row per issued token,
+  keyed by its `jti` claim. `app/core/deps.py::_authenticate` (shared by
+  `get_current_user` / `get_current_session`) checks it on every request:
+  revoked -> reject; idle longer than `session_inactivity_grace_minutes`
+  -> revoke + reject; otherwise `last_seen_at` is bumped (sliding window)
+  and the request proceeds.
+- **Two timeouts, one policy** (`app/core/config.py`): `session_inactivity_minutes`
+  (10) is what `app.js` actually enforces - it tracks mouse/keyboard/
+  scroll/touch activity and every successful `api()` call, warns the user
+  60 seconds before the cutoff (any activity, including passive mouse
+  movement, dismisses the warning and resets the clock - see
+  `#inactivity-warning` / `showInactivityWarning()`), and auto-logs-out if
+  nothing resets it. `session_inactivity_grace_minutes` (12) is the
+  server's own backstop, deliberately a bit longer: `app.js` throttles its
+  "keep the server-side session fresh" pings to once every 60s, so a
+  server cutoff at exactly 10 minutes could 401 a genuinely-active user a
+  few seconds early. The grace period exists so the client-side timer -
+  not a hair-trigger server clock - drives the real UX; the server backstop
+  still means a token can't be replayed indefinitely if it's ever used
+  directly against the API (bypassing the frontend's timer entirely).
+- **`POST /api/auth/logout`** revokes only the calling token's own session
+  (not every session the user has - a logout in one tab/device doesn't
+  kill another). Both the manual Sign Out button and the frontend's
+  auto-logout call it - `finishSignOut()` in `app.js` is the single place
+  that actually clears local state and redirects, so neither path can
+  skip the server-side revocation.
+- A `401` from any `api()` call (revoked or inactivity-expired) forces the
+  same sign-out path immediately, rather than leaving the UI acting as if
+  it's still authenticated.
+
 ## Roles & permissions (RBAC)
 
 Roles are no longer a fixed enum - `roles` / `permissions` / `role_permissions`
@@ -348,9 +385,12 @@ MANAGE_ROLES lockout guard including the inactive-user edge case
 (`test_rbac.py::test_lockout_guard_*`), the top-up net base formula and
 its zero/negative/missing-component guard, the `INVALID_TOPUP_BASE`
 exception being computed fresh (and clearing itself when the upstream
-figures are corrected, without a re-match), and the DSA/DTL Summary
-report amount-columns-reconcile-with-Total-Commission sanity check
-(`test_topup_base_and_reports.py`).
+figures are corrected, without a re-match), the DSA/DTL Summary report
+amount-columns-reconcile-with-Total-Commission sanity check
+(`test_topup_base_and_reports.py`), and session auth - sliding-window
+revalidation, revocation on logout, the server-side inactivity backstop,
+and that logging out one session doesn't touch another
+(`test_session_auth.py`).
 
 `tests/conftest.py` seeds the same role/permission catalog into the
 in-memory test DB that the RBAC migration seeds in production (reusing
