@@ -1,0 +1,96 @@
+name: Test & Deploy
+
+# Trigger: push/merge to master (the repo's actual default branch - confirmed
+# via `gh repo view` / `git ls-remote`, not assumed). PRs into master run the
+# test job only, via pull_request below, so a broken PR can't merge blind -
+# but only a push to master itself deploys.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -v
+        # Tests run against an in-memory SQLite DB (see tests/conftest.py) -
+        # no Postgres service container needed here. Production always runs
+        # on PostgreSQL; this is a testing convenience only.
+
+  deploy:
+    name: Deploy to production
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Rsync application code
+        run: |
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.env' \
+            --exclude='venv/' \
+            --exclude='uploads/' \
+            --exclude='__pycache__/' \
+            --exclude='*.pyc' \
+            -e "ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts" \
+            ./ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/dsa/
+
+      - name: Install deps, migrate, restart, health-check
+        run: |
+          ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+          set -euo pipefail
+
+          # Ownership: rsync (running as the deploy user over SSH) writes
+          # files as that user - hand them back to dsa before dsa-owned
+          # processes (venv, systemd unit) touch them.
+          sudo chown -R dsa:dsa /opt/dsa
+
+          cd /opt/dsa
+          sudo -u dsa venv/bin/pip install --quiet -r requirements.txt
+          sudo -u dsa venv/bin/alembic upgrade head
+
+          sudo systemctl restart dsa.service
+
+          # Fail loudly if the service didn't come back up healthy, rather
+          # than reporting a green deploy for a dead app.
+          for i in $(seq 1 10); do
+            if curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+              echo "Health check passed."
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Health check FAILED after restart - dumping recent logs:" >&2
+          sudo journalctl -u dsa.service --no-pager -n 50 >&2
+          exit 1
+          REMOTE
+
+      - name: Verify externally
+        run: |
+          curl -fsS https://dsa.miracore.co.tz/api/health

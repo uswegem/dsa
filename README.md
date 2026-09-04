@@ -392,6 +392,50 @@ revalidation, revocation on logout, the server-side inactivity backstop,
 and that logging out one session doesn't touch another
 (`test_session_auth.py`).
 
+## Deployment / CI-CD
+
+Production runs on `102.204.1.22` (`dsa.miracore.co.tz`), under `/opt/dsa`.
+That host is a **shared, live server** - it already runs an unrelated
+"MiraCore" stack (Apache Fineract + Keycloak in k3s, its own Postgres
+instance for that stack) - so DSA was deliberately kept isolated from it:
+
+- **Own Postgres cluster**: a separate PostgreSQL 16 cluster
+  (`postgresql@16-dsa.service`, port 5433, `listen_addresses=localhost`),
+  not the existing MiraCore instance. Nothing else on the box shares this
+  database.
+- **Plain systemd service**, not a k3s pod: `dsa.service` runs
+  `uvicorn app.main:app` on `127.0.0.1:8000` under a dedicated, unprivileged
+  `dsa` system user with `ProtectSystem=strict` / `ReadWritePaths=/opt/dsa`.
+  Decoupled from the k3s cluster the other apps here run in.
+- **Own nginx vhost + TLS**: `dsa.miracore.co.tz`, cert via
+  `certbot --webroot`, auto-renewing. Reverse-proxies to the uvicorn
+  service above.
+
+### Pipeline (`.github/workflows/deploy.yml`)
+
+Triggers on push to `master` (the repo's actual default branch - PRs into
+`master` run tests only, via the `pull_request` trigger, without deploying):
+
+1. **test** - installs deps, runs `pytest` (in-memory SQLite, no DB service
+   needed). Deploy only runs if this passes.
+2. **deploy** (push to `master` only) - `rsync`s the working tree to
+   `/opt/dsa` over SSH, then over the same connection: `pip install`,
+   `alembic upgrade head`, `systemctl restart dsa.service`, then polls
+   `/api/health` for up to ~20s and **fails the job** (dumping
+   `journalctl -u dsa.service`) if the service doesn't come back healthy.
+   A final step re-checks `https://dsa.miracore.co.tz/api/health` from
+   outside the box.
+
+All deploy credentials live in GitHub Actions secrets on this repo
+(`DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, `DEPLOY_HOST`, `DEPLOY_USER`) -
+never committed. The CI deploy key is a dedicated keypair (not the
+engineer's own SSH key used for manual server access), added as its own
+line in the server's `authorized_keys` so it can be revoked independently.
+
+`.env` on the server (DB URL, JWT secret, etc.) is deploy-target-local and
+excluded from the rsync (`--exclude='.env'`) - it's provisioned once during
+setup, not shipped by the pipeline.
+
 `tests/conftest.py` seeds the same role/permission catalog into the
 in-memory test DB that the RBAC migration seeds in production (reusing
 `app.services.permissions`, not the migration's frozen copy - tests should
