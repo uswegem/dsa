@@ -3,7 +3,7 @@ Application configuration.
 
 Commission rates and the top-up "net" basis are defined here, not scattered
 through the codebase, specifically so Finance can correct them later without
-touching calculation logic. See NET_TOPUP_BASIS_FIELD below.
+touching calculation logic. See the top-up "net" basis section below.
 """
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -31,17 +31,19 @@ class Settings(BaseSettings):
     dtl_rf_rate: float = 0.01
 
     # --- Top-up "net" basis -------------------------------------------------
-    # BEST-CURRENT-INTERPRETATION, not yet signed off by Finance:
-    # "net" for a top-up (RF) transaction = Business Manager file's
-    # "Payout To Client" column: the new money actually released to the
-    # client after their prior loan balance was settled.
+    # "net" for a top-up (RF) transaction = Appl Amount minus Letshego
+    # Topup (both from the Business Manager file) - i.e. the portion of the
+    # applied amount not already covered by Letshego's own top-up
+    # settlement. Confirmed by the business owner 2026-09; supersedes the
+    # earlier best-current-interpretation (Payout To Client).
     #
-    # This is intentionally named and isolated so it can be corrected in one
-    # place if Finance defines "net" differently (e.g. Payout To Client minus
-    # fees, or Letshego Topup minus some deduction). It maps to the
-    # BusinessTransaction.payout_to_client column — see
+    # Still named and isolated here, not inlined in the calculation logic,
+    # so it can be corrected again in one place if the definition changes.
+    # Maps to BusinessTransaction.appl_amount minus
+    # BusinessTransaction.letshego_topup - see
     # app/services/commission.py:get_topup_net_base().
-    net_topup_basis_field: str = "payout_to_client"
+    net_topup_minuend_field: str = "appl_amount"
+    net_topup_subtrahend_field: str = "letshego_topup"
 
 
 @lru_cache

@@ -8,11 +8,21 @@ Disbursement date - see MatchedTransaction.commission_period):
        for the DSAs under their supervision
 
 Gross = Business Manager Disbursement Amt (NL rows).
-Net   = configurable basis, currently Business Manager Payout To Client (RF
-        rows) - see Settings.net_topup_basis_field / get_topup_net_base().
+Net   = configurable basis, currently Business Manager Appl Amount minus
+        Letshego Topup (RF rows) - see Settings.net_topup_minuend_field /
+        net_topup_subtrahend_field and get_topup_net_base().
 
-Only MATCHED and MATCHED_WITH_WARNING transactions are eligible.
-A LOCKED run's commission_lines are never mutated - see lock_run().
+Only MATCHED and MATCHED_WITH_WARNING transactions are eligible. A
+non-positive (zero or negative) net base is never used silently - see
+get_topup_net_base()'s callers: calculate_commission_run() excludes such a
+transaction from commission, and app/services/exceptions.py surfaces it in
+the exceptions view (INVALID_TOPUP_BASE) until the underlying data is
+corrected.
+
+A LOCKED run's commission_lines are never mutated - see lock_run(). A
+formula change here (like the appl_amount/letshego_topup switch above)
+never retroactively recalculates an already-LOCKED run; only its own
+already-DRAFT runs, and any new run, pick it up.
 """
 import datetime as dt
 from dataclasses import dataclass, field
@@ -44,10 +54,21 @@ class CommissionRunError(Exception):
 def get_topup_net_base(bt: BusinessTransaction) -> float | None:
     """The single place that defines what 'net' means for a top-up (RF).
 
-    Currently: Payout To Client (see Settings.net_topup_basis_field docstring
-    for why, and what to change if Finance defines it differently).
+    Currently: Appl Amount minus Letshego Topup (see
+    Settings.net_topup_minuend_field/net_topup_subtrahend_field docstring
+    for why, and what to change if the definition changes again).
+
+    Returns None if either component is missing (can't compute). Returning
+    a non-positive number is deliberate - callers decide what to do with
+    it (calculate_commission_run excludes it from commission;
+    app/services/exceptions.py surfaces it as INVALID_TOPUP_BASE) rather
+    than this function silently hiding a bad value.
     """
-    return getattr(bt, settings.net_topup_basis_field)
+    minuend = getattr(bt, settings.net_topup_minuend_field)
+    subtrahend = getattr(bt, settings.net_topup_subtrahend_field)
+    if minuend is None or subtrahend is None:
+        return None
+    return float(minuend) - float(subtrahend)
 
 
 def _find_dtl_for_transaction(db: Session, bs: BranchSale, dsa: Dsa, on_date: dt.date) -> Dtl | None:

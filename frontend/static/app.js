@@ -111,7 +111,7 @@ async function loadBranches() {
   } catch (e) {
     state.branches = []; // requires MANAGE_BRANCHES; that's fine, selects just stay empty otherwise
   }
-  const selects = ["bm-branch-select", "run-branch-select", "exc-branch-select", "user-form-branch", "dsa-form-branch", "admin-dtl-branch"];
+  const selects = ["bm-branch-select", "run-branch-select", "exc-branch-select", "user-form-branch", "dsa-form-branch", "dtl-form-branch"];
   for (const id of selects) {
     const sel = document.getElementById(id);
     if (!sel) continue;
@@ -369,12 +369,13 @@ async function loadExceptions() {
   if (branch_id) params.set("branch_id", branch_id);
   const rows = await api(`/api/exceptions?${params.toString()}`);
 
-  const counts = { UNMATCHED_IN_BUSINESS_FILE: 0, UNMATCHED_IN_BRANCH_FILE: 0, DUPLICATE: 0, MATCHED_WITH_WARNING: 0 };
+  const counts = { UNMATCHED_IN_BUSINESS_FILE: 0, UNMATCHED_IN_BRANCH_FILE: 0, DUPLICATE: 0, MATCHED_WITH_WARNING: 0, INVALID_TOPUP_BASE: 0 };
   rows.forEach(r => { if (counts[r.match_status] !== undefined) counts[r.match_status]++; });
   document.getElementById("stat-unmatched-biz").textContent = counts.UNMATCHED_IN_BUSINESS_FILE;
   document.getElementById("stat-unmatched-branch").textContent = counts.UNMATCHED_IN_BRANCH_FILE;
   document.getElementById("stat-duplicates").textContent = counts.DUPLICATE;
   document.getElementById("stat-warnings").textContent = counts.MATCHED_WITH_WARNING;
+  document.getElementById("stat-invalid-topup-base").textContent = counts.INVALID_TOPUP_BASE;
 
   const tbody = document.querySelector("#exceptions-table tbody");
   tbody.innerHTML = rows.map(r => `<tr>
@@ -540,26 +541,52 @@ async function createBranch() {
 }
 
 // ---- Admin: DTLs ----
+let dtlsCache = [];
+
 async function refreshDtls() {
-  const dtls = await api("/api/admin/dtls");
-  document.querySelector("#admin-dtls-table tbody").innerHTML =
-    dtls.map(d => `<tr><td class="mono">${d.dtl_code}</td><td class="strong">${d.dtl_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td></tr>`).join("");
+  dtlsCache = await api("/api/admin/dtls");
+  document.querySelector("#admin-dtls-table tbody").innerHTML = dtlsCache.map(d => `
+    <tr><td class="mono">${d.dtl_code}</td><td class="strong">${d.dtl_name}</td>
+      <td class="tabular">${d.dtl_account_no ?? '<span class="muted">Not set</span>'}</td>
+      <td>${d.branch_id ? branchName(d.branch_id) : ""}</td>
+      <td><button class="link" onclick="openDtlForm(${d.id})">Edit</button></td>
+    </tr>`).join("");
 }
 
-async function createDtl() {
-  const dtl_code = document.getElementById("admin-dtl-code").value.trim();
-  const dtl_name = document.getElementById("admin-dtl-name").value.trim();
-  const branch_id = document.getElementById("admin-dtl-branch").value || null;
-  if (!dtl_code || !dtl_name) return flash("DTL code and name required", "err");
+function openDtlForm(dtlId) {
+  const dtl = dtlId ? dtlsCache.find(d => d.id === dtlId) : null;
+  document.getElementById("dtl-form-id").value = dtl ? dtl.id : "";
+  document.getElementById("dtl-form-code").value = dtl ? dtl.dtl_code : "";
+  document.getElementById("dtl-form-name").value = dtl ? dtl.dtl_name : "";
+  document.getElementById("dtl-form-account").value = dtl ? (dtl.dtl_account_no ?? "") : "";
+  document.getElementById("dtl-form-branch").value = dtl ? (dtl.branch_id ?? "") : "";
+  document.getElementById("dtl-form-code").disabled = !!dtl; // dtl_code is immutable once created
+  document.getElementById("dtl-form").classList.remove("hidden");
+}
+
+async function saveDtl() {
+  const id = document.getElementById("dtl-form-id").value;
+  const dtl_code = document.getElementById("dtl-form-code").value.trim();
+  const dtl_name = document.getElementById("dtl-form-name").value.trim();
+  const dtl_account_no = document.getElementById("dtl-form-account").value.trim() || null;
+  const branch_id = document.getElementById("dtl-form-branch").value || null;
+  if (!dtl_name || (!id && !dtl_code)) return flash("DTL code and name are required", "err");
   try {
-    await api("/api/admin/dtls", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dtl_code, dtl_name, branch_id: branch_id ? Number(branch_id) : null }),
-    });
-    flash("DTL created", "ok");
+    if (id) {
+      await api(`/api/admin/dtls/${id}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dtl_name, dtl_account_no, branch_id: branch_id ? Number(branch_id) : null }),
+      });
+      flash("DTL updated", "ok");
+    } else {
+      await api("/api/admin/dtls", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dtl_code, dtl_name, dtl_account_no, branch_id: branch_id ? Number(branch_id) : null }),
+      });
+      flash("DTL created", "ok");
+    }
     document.getElementById("dtl-form").classList.add("hidden");
-    document.getElementById("admin-dtl-code").value = "";
-    document.getElementById("admin-dtl-name").value = "";
+    document.getElementById("dtl-form-code").disabled = false;
     await refreshDtls();
   } catch (e) { flash(e.message, "err"); }
 }
@@ -658,8 +685,9 @@ document.getElementById("role-form-cancel").onclick = () => document.getElementB
 document.getElementById("toggle-branch-form").onclick = () => document.getElementById("branch-form").classList.toggle("hidden");
 document.getElementById("admin-create-branch").onclick = createBranch;
 
-document.getElementById("toggle-dtl-form").onclick = () => document.getElementById("dtl-form").classList.toggle("hidden");
-document.getElementById("admin-create-dtl").onclick = createDtl;
+document.getElementById("toggle-dtl-form").onclick = () => openDtlForm(null);
+document.getElementById("dtl-form-save").onclick = saveDtl;
+document.getElementById("dtl-form-cancel").onclick = () => { document.getElementById("dtl-form").classList.add("hidden"); document.getElementById("dtl-form-code").disabled = false; };
 
 document.getElementById("toggle-dsa-form").onclick = () => openDsaForm(null);
 document.getElementById("dsa-form-save").onclick = saveDsa;

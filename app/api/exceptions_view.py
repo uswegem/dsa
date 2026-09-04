@@ -1,21 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_any_permission
-from app.models import MatchedTransaction, User
-from app.models.enums import MatchStatus
+from app.models import User
 from app.schemas.commission import ExceptionRow
+from app.services.exceptions import find_exceptions
 from app.services.permissions import user_has_permission
 
 router = APIRouter(prefix="/api/exceptions", tags=["exceptions"])
-
-EXCEPTION_STATUSES = [
-    MatchStatus.UNMATCHED_IN_BUSINESS_FILE,
-    MatchStatus.UNMATCHED_IN_BRANCH_FILE,
-    MatchStatus.DUPLICATE,
-    MatchStatus.MATCHED_WITH_WARNING,
-]
 
 
 @router.get("", response_model=list[ExceptionRow])
@@ -28,11 +21,9 @@ def list_exceptions(
     if not user_has_permission(current_user, "VIEW_ALL_EXCEPTIONS"):
         branch_id = current_user.branch_id  # forced scope, can't be widened by query param
 
-    q = db.query(MatchedTransaction).filter(MatchedTransaction.match_status.in_(EXCEPTION_STATUSES))
-    rows = q.all()
-
     out: list[ExceptionRow] = []
-    for mt in rows:
+    for entry in find_exceptions(db):
+        mt = entry.matched_transaction
         bs = mt.branch_sale
         bt = mt.business_transaction
 
@@ -45,7 +36,7 @@ def list_exceptions(
 
         out.append(
             ExceptionRow(
-                match_status=mt.match_status.value,
+                match_status=entry.category,
                 branch_name=bs.branch.name if bs and bs.branch else None,
                 client_name=bs.client_name if bs else None,
                 client_account_no_branch=bs.client_account_no if bs else None,
@@ -54,7 +45,7 @@ def list_exceptions(
                 dsa_name=bs.dsa_name if bs else None,
                 loan_type=bt.loan_type.value if bt else None,
                 disbursement_date=bt.disbursement_date.isoformat() if bt else None,
-                notes=mt.match_notes,
+                notes=entry.note,
             )
         )
     return out

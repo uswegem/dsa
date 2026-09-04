@@ -230,6 +230,7 @@
             <div class="stat-card error"><div class="stat-label">Unmatched in branch file</div><div class="stat-figure" id="stat-unmatched-branch">0</div></div>
             <div class="stat-card error"><div class="stat-label">Duplicates</div><div class="stat-figure" id="stat-duplicates">0</div></div>
             <div class="stat-card warn"><div class="stat-label">Match warnings</div><div class="stat-figure" id="stat-warnings">0</div></div>
+            <div class="stat-card error"><div class="stat-label">Invalid top-up base</div><div class="stat-figure" id="stat-invalid-topup-base">0</div></div>
           </div>
 
           <section class="panel">
@@ -348,21 +349,26 @@
             </div>
           </section>
 
-          <section id="admin-section-dtls" class="admin-section panel hidden" style="max-width:820px">
+          <section id="admin-section-dtls" class="admin-section panel hidden" style="max-width:960px">
             <div class="panel-head">
               <h2>DTLs</h2>
               <button class="secondary" id="toggle-dtl-form">+ New DTL</button>
             </div>
             <div id="dtl-form" class="collapsible hidden">
-              <div class="grid" style="grid-template-columns:1fr 1fr 1fr auto; align-items:end;">
-                <div><label>DTL Code</label><input id="admin-dtl-code" class="mono" /></div>
-                <div><label>DTL Name</label><input id="admin-dtl-name" /></div>
-                <div><label>Branch</label><select id="admin-dtl-branch"></select></div>
-                <button id="admin-create-dtl">Create</button>
+              <input type="hidden" id="dtl-form-id" />
+              <div class="grid cols-3">
+                <div><label>DTL Code</label><input id="dtl-form-code" class="mono" /></div>
+                <div><label>DTL Name</label><input id="dtl-form-name" /></div>
+                <div><label>DTL Bank Account</label><input id="dtl-form-account" class="tabular" /></div>
+                <div><label>Branch</label><select id="dtl-form-branch"></select></div>
+                <div class="field-end">
+                  <button id="dtl-form-save">Save DTL</button>
+                  <button class="secondary" id="dtl-form-cancel">Cancel</button>
+                </div>
               </div>
             </div>
             <div class="table-wrap">
-              <table id="admin-dtls-table"><thead><tr><th>Code</th><th>Name</th><th>Branch</th></tr></thead><tbody></tbody></table>
+              <table id="admin-dtls-table"><thead><tr><th>Code</th><th>Name</th><th>Bank Account</th><th>Branch</th><th>Actions</th></tr></thead><tbody></tbody></table>
             </div>
           </section>
         </section>

@@ -123,13 +123,32 @@ Rates live in `app/core/config.py::Settings` (`dsa_nl_rate`, `dtl_nl_rate`,
 
 ### What "net" means for top-ups (RF)
 
-**Not yet signed off by Finance.** Current basis: Business Manager's
-**Payout To Client** column - the new money released to the client after
-their prior loan balance was settled. This is deliberately isolated in one
-place - `Settings.net_topup_basis_field` (see its docstring) and
-`app/services/commission.py::get_topup_net_base()` - so it can be corrected
-without touching any other calculation logic. If Finance defines "net"
-differently, change only that one function/setting.
+**Confirmed by the business owner, 2026-09.** Current basis: Business
+Manager's **Appl Amount minus Letshego Topup** - the portion of the
+applied amount not already covered by Letshego's own top-up settlement.
+(Superseded an earlier best-current-interpretation, Payout To Client -
+`payout_to_client` is still stored on `business_transactions` for
+reference/reconciliation, just no longer used as the commission base.)
+This is deliberately isolated in one place -
+`Settings.net_topup_minuend_field` / `net_topup_subtrahend_field` (see
+their docstring) and `app/services/commission.py::get_topup_net_base()` -
+so it can be corrected again without touching any other calculation logic.
+
+**A non-positive net base (zero, negative, or a missing component) is
+never used silently.** `calculate_commission_run` excludes that
+transaction from commission (matches the existing zero/missing-base
+guard), and `app/services/exceptions.py::find_exceptions()` surfaces it
+in the Exceptions view/report as `INVALID_TOPUP_BASE` - computed fresh
+every call (never stored), so a later upload correcting the Appl
+Amount/Letshego Topup figures clears the flag automatically, the same way
+`UNMATCHED_*` self-resolves.
+
+**Formula changes never touch a LOCKED run.** Recalculation is refused
+outright for anything but a `DRAFT` run (see "Commission run lifecycle"
+below); a `LOCKED`/`PAID` run's `commission_lines` keep whatever was
+computed under whichever formula was live at calc time. Correcting an
+already-locked run to a newer formula is a deliberate
+`commission_adjustments` entry, not something the app does automatically.
 
 ## Incremental uploads & period selection
 
@@ -211,7 +230,28 @@ Reports below).
 Every sheet of every Excel export (`app/reports/excel.py`) opens with a
 2-row banner: the period covered, the generation timestamp, and a status
 line - orange/"NOT finalized" for a `DRAFT` (or standalone, run-less)
-export, green/"finalized" once the run is `LOCKED` or `PAID`.
+export, green/"finalized" once the run is `LOCKED` or `PAID`. Applies
+identically everywhere the DSA/DTL Summary sheets are generated - branch-
+scoped Branch Manager downloads and consolidated/per-branch Business
+Manager downloads all come from the same `_add_dsa_summary_sheet` /
+`_add_dtl_summary_sheet`.
+
+**DSA Summary**: DSA Code, DSA Name, Branch, DSA Bank Account (`dsa_account_no`,
+blank/"Not set" if unassigned), New Loans Amount, Topup Loans Amount, Total
+Commission. **DTL Summary**: DTL Name, Branch, DSAs Supervised, DTL Bank
+Account (`dtl_account_no`, "Not set" until backfilled via Admin > DTLs),
+New Loans Amount, Topup Loans Amount, Total Commission.
+
+The two Amount columns are summed from the exact same `CommissionLine.base_amount`
+values that produced that row's Total Commission (`aggregate_dsa_summary`
+/ `aggregate_dtl_summary` in `app/reports/excel.py`, kept as pure,
+independently-testable functions for exactly this reason) - so
+`New Loans Amount * dsa_nl_rate + Topup Loans Amount * dsa_rf_rate` always
+equals the row's Total Commission by construction, not by coincidence; see
+`tests/test_topup_base_and_reports.py::test_dsa_and_dtl_summary_amounts_reconcile_with_total_commission`.
+All three amount columns render as real Excel currency cells
+(`number_format = "#,##0.00"`), not raw floats - applied consistently to
+every monetary column across all four sheet types, not just these two.
 
 ## Roles & permissions (RBAC)
 
@@ -303,9 +343,14 @@ the other file arrives later, the DTL `PENDING-` code reconciliation
 (including the same-name-different-branch non-collision case), same-day
 vs. next-day DTL reassignment history, commission rate math, the
 locked-run-cannot-recalculate guard, permission checks
-(`test_rbac.py::test_user_has_permission_reflects_role_grants`), and the
+(`test_rbac.py::test_user_has_permission_reflects_role_grants`), the
 MANAGE_ROLES lockout guard including the inactive-user edge case
-(`test_rbac.py::test_lockout_guard_*`).
+(`test_rbac.py::test_lockout_guard_*`), the top-up net base formula and
+its zero/negative/missing-component guard, the `INVALID_TOPUP_BASE`
+exception being computed fresh (and clearing itself when the upstream
+figures are corrected, without a re-match), and the DSA/DTL Summary
+report amount-columns-reconcile-with-Total-Commission sanity check
+(`test_topup_base_and_reports.py`).
 
 `tests/conftest.py` seeds the same role/permission catalog into the
 in-memory test DB that the RBAC migration seeds in production (reusing

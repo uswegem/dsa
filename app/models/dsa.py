@@ -33,6 +33,11 @@ class Dtl(Base):
     dtl_code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     dtl_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
+    # The DTL's account for commission payment, shown on the DTL Summary
+    # report. Not in any upload format - captured/edited via Admin > DTLs.
+    # NULL until backfilled for existing records.
+    dtl_account_no: Mapped[str | None] = mapped_column(String(30))
+
     # Not in the original Branch Manager file schema (a DTL's branch is
     # otherwise only implied through the DSAs currently assigned to them).
     # Added on request to record it directly, e.g. from an org chart /

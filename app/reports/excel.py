@@ -33,7 +33,8 @@ from app.models import (
     Dtl,
     MatchedTransaction,
 )
-from app.models.enums import MatchStatus, PayeeType, RunStatus
+from app.models.enums import LoanType, MatchStatus, PayeeType, RunStatus
+from app.services.exceptions import EXCEPTION_CATEGORY_LABELS, find_exceptions
 
 HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -41,6 +42,7 @@ TOTAL_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="so
 TOTAL_FONT = Font(bold=True)
 IN_PROGRESS_FILL = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 FINALIZED_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+CURRENCY_FORMAT = "#,##0.00"
 
 BANNER_ROWS = 3  # 1: period/generated-at, 2: status note, 3: blank spacer
 HEADER_ROW = BANNER_ROWS + 1
@@ -143,7 +145,9 @@ def _add_transaction_detail_sheet(wb: Workbook, db: Session, run: CommissionRun,
             mt.match_status.value,
         ]
         for col, v in enumerate(values, start=1):
-            ws.cell(row=row_idx, column=col, value=v)
+            cell = ws.cell(row=row_idx, column=col, value=v)
+            if col in (11, 14):  # Base Amount, Commission Amount
+                cell.number_format = CURRENCY_FORMAT
         total += float(line.commission_amount)
         row_idx += 1
 
@@ -151,49 +155,86 @@ def _add_transaction_detail_sheet(wb: Workbook, db: Session, run: CommissionRun,
     ws.cell(row=total_row, column=13, value="TOTAL").font = TOTAL_FONT
     total_cell = ws.cell(row=total_row, column=14, value=round(total, 2))
     total_cell.font = TOTAL_FONT
+    total_cell.number_format = CURRENCY_FORMAT
     for col in range(1, len(headers) + 1):
         ws.cell(row=total_row, column=col).fill = TOTAL_FILL
 
     _autosize(ws, headers)
 
 
-def _add_dsa_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch_id: int | None) -> None:
-    ws = wb.create_sheet("DSA Summary")
-    headers = ["DSA Code", "DSA Name", "Branch", "NL Deals", "RF Deals", "Total Deals", "Total Commission"]
-    _write_meta_banner(ws, len(headers), run.period, run.status)
-    _write_header(ws, headers)
+def aggregate_dsa_summary(lines: list[CommissionLine]) -> dict[int, dict]:
+    """Pure aggregation, kept separate from sheet-writing so it's directly
+    unit-testable: New Loans Amount / Topup Loans Amount are summed from
+    the exact same CommissionLine.base_amount values used to produce
+    Total Commission, so `nl_amount * dsa_nl_rate + rf_amount * dsa_rf_rate
+    == total_commission` always holds by construction - see
+    tests/test_report_aggregation.py.
 
-    lines = (
-        _commission_lines_query(db, run, branch_id).filter(CommissionLine.payee_type == PayeeType.DSA).all()
-    )
+    lines: CommissionLine rows for payee_type == DSA.
+    Returns {dsa_id: {"dsa", "branch_name", "nl_amount", "rf_amount", "total_commission"}}.
+    """
     by_dsa: dict[int, dict] = {}
     for line in lines:
         dsa = line.dsa
         agg = by_dsa.setdefault(
             dsa.id,
-            {"dsa": dsa, "nl": 0, "rf": 0, "total_commission": 0.0, "branch": dsa.branch.name if dsa.branch else ""},
+            {"dsa": dsa, "branch_name": dsa.branch.name if dsa.branch else "", "nl_amount": 0.0, "rf_amount": 0.0, "total_commission": 0.0},
         )
-        if line.loan_type.value == "NL":
-            agg["nl"] += 1
+        if line.loan_type == LoanType.NL:
+            agg["nl_amount"] += float(line.base_amount)
         else:
-            agg["rf"] += 1
+            agg["rf_amount"] += float(line.base_amount)
         agg["total_commission"] += float(line.commission_amount)
+    return by_dsa
+
+
+def aggregate_dtl_summary(lines: list[CommissionLine]) -> dict[int, dict]:
+    """Same contract as aggregate_dsa_summary, for payee_type == DTL lines.
+    Returns {dtl_id: {"dtl", "branch_name", "dsas", "nl_amount", "rf_amount", "total_commission"}}.
+    """
+    by_dtl: dict[int, dict] = {}
+    for line in lines:
+        dtl = line.dtl
+        agg = by_dtl.setdefault(
+            dtl.id,
+            {"dtl": dtl, "branch_name": dtl.branch.name if dtl.branch else "", "dsas": set(), "nl_amount": 0.0, "rf_amount": 0.0, "total_commission": 0.0},
+        )
+        agg["dsas"].add(line.matched_transaction.branch_sale.dsa_code)
+        if line.loan_type == LoanType.NL:
+            agg["nl_amount"] += float(line.base_amount)
+        else:
+            agg["rf_amount"] += float(line.base_amount)
+        agg["total_commission"] += float(line.commission_amount)
+    return by_dtl
+
+
+def _add_dsa_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch_id: int | None) -> None:
+    ws = wb.create_sheet("DSA Summary")
+    headers = ["DSA Code", "DSA Name", "Branch", "DSA Bank Account", "New Loans Amount", "Topup Loans Amount", "Total Commission"]
+    _write_meta_banner(ws, len(headers), run.period, run.status)
+    _write_header(ws, headers)
+
+    lines = _commission_lines_query(db, run, branch_id).filter(CommissionLine.payee_type == PayeeType.DSA).all()
+    by_dsa = aggregate_dsa_summary(lines)
 
     row_idx = DATA_START_ROW
-    grand_total = 0.0
+    totals = {"nl_amount": 0.0, "rf_amount": 0.0, "total_commission": 0.0}
     for agg in sorted(by_dsa.values(), key=lambda a: a["dsa"].dsa_name):
         dsa = agg["dsa"]
-        values = [
-            dsa.dsa_code, dsa.dsa_name, agg["branch"], agg["nl"], agg["rf"],
-            agg["nl"] + agg["rf"], round(agg["total_commission"], 2),
-        ]
-        for col, v in enumerate(values, start=1):
+        row = [dsa.dsa_code, dsa.dsa_name, agg["branch_name"], dsa.dsa_account_no or "Not set"]
+        for col, v in enumerate(row, start=1):
             ws.cell(row=row_idx, column=col, value=v)
-        grand_total += agg["total_commission"]
+        for col, key in ((5, "nl_amount"), (6, "rf_amount"), (7, "total_commission")):
+            cell = ws.cell(row=row_idx, column=col, value=round(agg[key], 2))
+            cell.number_format = CURRENCY_FORMAT
+            totals[key] += agg[key]
         row_idx += 1
 
-    ws.cell(row=row_idx, column=6, value="TOTAL").font = TOTAL_FONT
-    ws.cell(row=row_idx, column=7, value=round(grand_total, 2)).font = TOTAL_FONT
+    ws.cell(row=row_idx, column=4, value="TOTAL").font = TOTAL_FONT
+    for col, key in ((5, "nl_amount"), (6, "rf_amount"), (7, "total_commission")):
+        cell = ws.cell(row=row_idx, column=col, value=round(totals[key], 2))
+        cell.font = TOTAL_FONT
+        cell.number_format = CURRENCY_FORMAT
     for col in range(1, len(headers) + 1):
         ws.cell(row=row_idx, column=col).fill = TOTAL_FILL
 
@@ -202,51 +243,35 @@ def _add_dsa_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch
 
 def _add_dtl_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch_id: int | None) -> None:
     ws = wb.create_sheet("DTL Summary")
-    headers = ["DTL Code", "DTL Name", "DSAs Supervised", "NL Deals", "RF Deals", "Total Deals", "Total Commission"]
+    headers = ["DTL Name", "Branch", "DSAs Supervised", "DTL Bank Account", "New Loans Amount", "Topup Loans Amount", "Total Commission"]
     _write_meta_banner(ws, len(headers), run.period, run.status)
     _write_header(ws, headers)
 
-    lines = (
-        _commission_lines_query(db, run, branch_id).filter(CommissionLine.payee_type == PayeeType.DTL).all()
-    )
-    by_dtl: dict[int, dict] = {}
-    for line in lines:
-        dtl = line.dtl
-        agg = by_dtl.setdefault(dtl.id, {"dtl": dtl, "nl": 0, "rf": 0, "total_commission": 0.0, "dsas": set()})
-        agg["dsas"].add(line.matched_transaction.branch_sale.dsa_code)
-        if line.loan_type.value == "NL":
-            agg["nl"] += 1
-        else:
-            agg["rf"] += 1
-        agg["total_commission"] += float(line.commission_amount)
+    lines = _commission_lines_query(db, run, branch_id).filter(CommissionLine.payee_type == PayeeType.DTL).all()
+    by_dtl = aggregate_dtl_summary(lines)
 
     row_idx = DATA_START_ROW
-    grand_total = 0.0
+    totals = {"nl_amount": 0.0, "rf_amount": 0.0, "total_commission": 0.0}
     for agg in sorted(by_dtl.values(), key=lambda a: a["dtl"].dtl_name):
         dtl = agg["dtl"]
-        values = [
-            dtl.dtl_code, dtl.dtl_name, len(agg["dsas"]), agg["nl"], agg["rf"],
-            agg["nl"] + agg["rf"], round(agg["total_commission"], 2),
-        ]
-        for col, v in enumerate(values, start=1):
+        row = [dtl.dtl_name, agg["branch_name"], len(agg["dsas"]), dtl.dtl_account_no or "Not set"]
+        for col, v in enumerate(row, start=1):
             ws.cell(row=row_idx, column=col, value=v)
-        grand_total += agg["total_commission"]
+        for col, key in ((5, "nl_amount"), (6, "rf_amount"), (7, "total_commission")):
+            cell = ws.cell(row=row_idx, column=col, value=round(agg[key], 2))
+            cell.number_format = CURRENCY_FORMAT
+            totals[key] += agg[key]
         row_idx += 1
 
-    ws.cell(row=row_idx, column=6, value="TOTAL").font = TOTAL_FONT
-    ws.cell(row=row_idx, column=7, value=round(grand_total, 2)).font = TOTAL_FONT
+    ws.cell(row=row_idx, column=4, value="TOTAL").font = TOTAL_FONT
+    for col, key in ((5, "nl_amount"), (6, "rf_amount"), (7, "total_commission")):
+        cell = ws.cell(row=row_idx, column=col, value=round(totals[key], 2))
+        cell.font = TOTAL_FONT
+        cell.number_format = CURRENCY_FORMAT
     for col in range(1, len(headers) + 1):
         ws.cell(row=row_idx, column=col).fill = TOTAL_FILL
 
     _autosize(ws, headers)
-
-
-EXCEPTION_CATEGORY_LABELS = {
-    MatchStatus.UNMATCHED_IN_BUSINESS_FILE: "Unmatched - in Branch Manager file only (no Business Manager transaction)",
-    MatchStatus.UNMATCHED_IN_BRANCH_FILE: "Unmatched - in Business Manager file only (no DSA/DTL attribution)",
-    MatchStatus.DUPLICATE: "Duplicate - multiple Business Manager candidates for one Branch Manager row",
-    MatchStatus.MATCHED_WITH_WARNING: "Matched with warning - secondary check (CLIENT_CHECK_NO vs EMPLOYEE_NO) failed",
-}
 
 
 def add_exceptions_sheet(
@@ -262,18 +287,13 @@ def add_exceptions_sheet(
     _write_meta_banner(ws, len(headers), period, run.status if run else None)
     _write_header(ws, headers)
 
-    statuses = [MatchStatus.UNMATCHED_IN_BUSINESS_FILE, MatchStatus.UNMATCHED_IN_BRANCH_FILE, MatchStatus.DUPLICATE]
-    if include_matched_with_warning:
-        statuses.append(MatchStatus.MATCHED_WITH_WARNING)
-
-    q = db.query(MatchedTransaction).filter(MatchedTransaction.match_status.in_(statuses))
-    # Exceptions aren't all tied to a resolved commission_period (e.g.
-    # UNMATCHED_IN_BUSINESS_FILE has none), so scope by period OR by branch
-    # via whichever side of the match is present.
-    rows = q.all()
+    entries = find_exceptions(db)
+    if not include_matched_with_warning:
+        entries = [e for e in entries if e.category != MatchStatus.MATCHED_WITH_WARNING.value]
 
     row_idx = DATA_START_ROW
-    for mt in rows:
+    for entry in entries:
+        mt = entry.matched_transaction
         bs = mt.branch_sale
         bt = mt.business_transaction
 
@@ -287,7 +307,7 @@ def add_exceptions_sheet(
                 continue
 
         values = [
-            EXCEPTION_CATEGORY_LABELS.get(mt.match_status, mt.match_status.value),
+            EXCEPTION_CATEGORY_LABELS.get(entry.category, entry.category),
             bs.branch.name if bs and bs.branch else "",
             bs.client_name if bs else (f"(business txn only, acct {bt.client_disb_ext_account_no})" if bt else ""),
             bs.client_account_no if bs else "",
@@ -298,10 +318,12 @@ def add_exceptions_sheet(
             bt.disbursement_date.isoformat() if bt else "",
             float(bs.reported_amount) if bs and bs.reported_amount is not None else "",
             float(bt.disbursement_amt) if bt and bt.disbursement_amt is not None else "",
-            mt.match_notes or "",
+            entry.note or "",
         ]
         for col, v in enumerate(values, start=1):
-            ws.cell(row=row_idx, column=col, value=v)
+            cell = ws.cell(row=row_idx, column=col, value=v)
+            if col in (10, 11):  # Reported Amount, Disbursement Amt
+                cell.number_format = CURRENCY_FORMAT
         row_idx += 1
 
     _autosize(ws, headers)

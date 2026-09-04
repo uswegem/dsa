@@ -176,7 +176,7 @@ tbody tr:hover { background: var(--y100); }
 tbody tr.clickable { cursor: pointer; }
 td.num { font-variant-numeric: tabular-nums; }
 td.id-col { color: var(--n600); font-variant-numeric: tabular-nums; }
-td.muted { color: var(--n600); }
+td.muted, .muted { color: var(--n600); }
 td.strong { font-weight: 500; }
 
 /* ---------------- Status / severity / match badges ---------------- */
@@ -194,7 +194,7 @@ td.strong { font-weight: 500; }
 
 .match-MATCHED { background: var(--success-tint); color: var(--success); border-color: var(--success); }
 .match-MATCHED_WITH_WARNING { background: var(--warn-tint); color: var(--warn); border-color: var(--warn); }
-.match-UNMATCHED_IN_BUSINESS_FILE, .match-UNMATCHED_IN_BRANCH_FILE, .match-DUPLICATE { background: var(--err-tint); color: var(--err); border-color: var(--err); }
+.match-UNMATCHED_IN_BUSINESS_FILE, .match-UNMATCHED_IN_BRANCH_FILE, .match-DUPLICATE, .match-INVALID_TOPUP_BASE { background: var(--err-tint); color: var(--err); border-color: var(--err); }
 
 .role-badge { background: var(--n200); color: var(--n800); border-color: var(--n300); }
 .perm-chip { font-size: 10.5px; font-family: ui-monospace, monospace; background: var(--n200); color: var(--n800); border: 1px solid var(--n300); padding: 2px 7px; }
@@ -223,7 +223,7 @@ td.strong { font-weight: 500; }
 .stat-cell.error .stat-label, .stat-cell.error .stat-figure { color: var(--err); }
 .stat-cell.warn .stat-label, .stat-cell.warn .stat-figure { color: var(--warn); }
 
-.stat-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; margin-bottom: 20px; }
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 2px; margin-bottom: 20px; }
 .stat-cards .stat-card { background: #FFFFFF; border: 1px solid var(--n300); border-top: 3px solid; padding: 16px 18px; }
 .stat-cards .stat-card.error { border-top-color: var(--err); }
 .stat-cards .stat-card.warn { border-top-color: var(--warn); }

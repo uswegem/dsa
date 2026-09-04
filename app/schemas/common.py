@@ -18,6 +18,7 @@ class DtlOut(BaseModel):
     id: int
     dtl_code: str
     dtl_name: str
+    dtl_account_no: str | None
     branch_id: int | None
 
     model_config = {"from_attributes": True}
@@ -26,6 +27,13 @@ class DtlOut(BaseModel):
 class DtlCreate(BaseModel):
     dtl_code: str
     dtl_name: str
+    dtl_account_no: str | None = None
+    branch_id: int | None = None
+
+
+class DtlUpdate(BaseModel):
+    dtl_name: str | None = None
+    dtl_account_no: str | None = None
     branch_id: int | None = None
 
 
