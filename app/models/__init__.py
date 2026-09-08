@@ -10,6 +10,7 @@ from app.models.enums import (
 )
 from app.models.rbac import Role, Permission, role_permissions
 from app.models.user import Branch, User
+from app.models.session import UserSession
 from app.models.dsa import Dsa, Dtl, DsaDtlAssignment
 from app.models.upload import Upload, UploadError
 from app.models.sales import BranchSale, BusinessTransaction, MatchedTransaction
@@ -30,6 +31,7 @@ __all__ = [
     "role_permissions",
     "Branch",
     "User",
+    "UserSession",
     "Dsa",
     "Dtl",
     "DsaDtlAssignment",

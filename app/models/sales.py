@@ -90,7 +90,7 @@ class BusinessTransaction(Base):
 
     disbursement_date: Mapped[dt.date] = mapped_column(Date, nullable=False)  # THE field used for period bucketing
     disbursement_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))  # gross base for NL
-    payout_to_client: Mapped[float | None] = mapped_column(Numeric(18, 2))  # current net basis for RF - see Settings.net_topup_basis_field
+    payout_to_client: Mapped[float | None] = mapped_column(Numeric(18, 2))  # stored for reference/reconciliation only - not the RF commission base, see app/services/commission.py::get_topup_net_base
     letshego_topup: Mapped[float | None] = mapped_column(Numeric(18, 2))
     appl_amount: Mapped[float | None] = mapped_column(Numeric(18, 2))
 

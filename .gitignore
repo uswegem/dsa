@@ -11,3 +11,7 @@ uploads/
 *.log
 .vscode/
 .idea/
+
+# redundant raw archive - its contents are already extracted and tracked
+# under docs/design_handoff_lfb_commission_rebrand/
+docs/*.zip

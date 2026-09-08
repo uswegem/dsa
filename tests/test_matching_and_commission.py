@@ -158,7 +158,8 @@ def test_commission_calculation_rates_and_exclusions(db_session):
     ))
     db.add(BusinessTransaction(
         upload_id=biz_upload.id, row_number=3, branch_name_raw="Arusha", employee_no="999",
-        loan_type=LoanType.RF, disbursement_date=dt.date(2026, 8, 6), payout_to_client=200_000,
+        loan_type=LoanType.RF, disbursement_date=dt.date(2026, 8, 6),
+        appl_amount=250_000, letshego_topup=50_000,  # net base = 250,000 - 50,000 = 200,000
         client_disb_ext_account_no="ACC002",
     ))
     db.flush()
@@ -179,7 +180,7 @@ def test_commission_calculation_rates_and_exclusions(db_session):
 
     assert float(dsa_nl.commission_amount) == 70_000.0   # 7% of 1,000,000 gross
     assert float(dtl_nl.commission_amount) == 10_000.0   # 1% of 1,000,000 gross
-    assert float(dsa_rf.commission_amount) == 6_000.0    # 3% of 200,000 net (Payout To Client)
+    assert float(dsa_rf.commission_amount) == 6_000.0    # 3% of 200,000 net (Appl Amount - Letshego Topup)
     assert float(dtl_rf.commission_amount) == 2_000.0    # 1% of 200,000 net
 
     total = sum(float(l.commission_amount) for l in lines)

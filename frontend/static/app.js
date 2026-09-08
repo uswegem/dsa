@@ -20,7 +20,20 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     let detail = res.statusText;
     try { const j = await res.json(); detail = j.detail || detail; } catch (e) {}
+    if (res.status === 401 && state.token) {
+      // The server rejected an authenticated call outright (revoked/expired
+      // session) - don't leave the UI acting as if it's still logged in.
+      forceSignOutToLogin(detail.toLowerCase().includes("inactivity") ? "inactivity" : null);
+    }
     throw new Error(detail);
+  }
+  // A successful authenticated call is real activity - reset the client
+  // timer and count it as a fresh server-side touch (last_seen_at was just
+  // bumped by this very request), so the next passive-activity ping isn't
+  // redundant.
+  if (state.token) {
+    armInactivityTimers();
+    lastServerPingAt = Date.now();
   }
   const ct = res.headers.get("content-type") || "";
   if (ct.includes("application/json")) return res.json();
@@ -39,34 +52,151 @@ async function login() {
     localStorage.setItem("dsa_token", state.token);
     await afterLogin();
   } catch (e) {
-    flash(e.message, "err", "login-flash");
+    flash(`<strong>Sign-in failed.</strong> ${e.message}`, "err", "login-flash");
   }
 }
 
 const ADMIN_SECTION_PERMS = ["MANAGE_USERS", "MANAGE_ROLES", "MANAGE_BRANCHES", "MANAGE_DSAS", "MANAGE_DTLS"];
 
+const PAGE_META = {
+  uploads: { crumb: "Commission · Data intake", title: "Uploads" },
+  runs: { crumb: "Commission · Payouts", title: "Commission Runs" },
+  exceptions: { crumb: "Commission · Review", title: "Exceptions" },
+  admin: {
+    users: { crumb: "Administration", title: "Users" },
+    roles: { crumb: "Administration", title: "Roles" },
+    branches: { crumb: "Administration", title: "Branches" },
+    dsas: { crumb: "Administration", title: "DSAs" },
+    dtls: { crumb: "Administration", title: "DTLs" },
+  },
+};
+
+function setPageHeader(crumb, title) {
+  document.getElementById("page-crumb").textContent = crumb;
+  document.getElementById("page-title").textContent = title;
+}
+
+function initials(name) {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  const first = parts[0][0] || "";
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
+  return (first + last).toUpperCase();
+}
+
 async function afterLogin() {
   state.user = await api("/api/auth/me");
   document.getElementById("login-screen").classList.add("hidden");
   document.getElementById("app-screen").classList.remove("hidden");
-  document.getElementById("userbox").innerHTML =
-    `${state.user.full_name} (${state.user.role_name}) <button class="secondary" id="logout-btn">Sign out</button>`;
-  document.getElementById("logout-btn").onclick = logout;
 
-  document.querySelector('nav button[data-tab="admin"]').classList.toggle("hidden", !hasAnyPerm(ADMIN_SECTION_PERMS));
+  await loadBranches();
+
+  const branchLabel = state.user.branch_id ? branchName(state.user.branch_id) : null;
+  document.getElementById("userbox").innerHTML = `
+    <div class="topbar-identity">
+      <div class="name">${state.user.full_name}</div>
+      <div class="subtitle">${state.user.role_name}${branchLabel ? " · " + branchLabel : ""}</div>
+    </div>
+    <div class="avatar-chip">${initials(state.user.full_name)}</div>
+    <button id="logout-btn">Sign out</button>`;
+  document.getElementById("logout-btn").onclick = logout;
+  document.getElementById("page-scope").textContent = branchLabel || "All branches";
+  document.getElementById("sidebar-today").textContent = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+
+  // A Branch Manager's uploads are always attributed to their own branch
+  // server-side (see app/api/uploads.py) - there's nothing for them to
+  // choose, so don't show a control that implies otherwise.
+  document.getElementById("bm-branch-field").classList.toggle("hidden", state.user.role_name === "BRANCH_MANAGER");
+
+  document.getElementById("admin-nav-group").classList.toggle("hidden", !hasAnyPerm(ADMIN_SECTION_PERMS));
   document.querySelectorAll("#admin-subnav button").forEach(b => {
     b.classList.toggle("hidden", !hasPerm(b.dataset.perm));
   });
 
-  await loadBranches();
   await refreshUploads();
   await refreshRuns();
+  refreshSidebarExceptionsPill();
 }
 
-function logout() {
+async function logout(reason) {
+  clearInactivityTimers();
+  hideInactivityWarning();
+  try { await api("/api/auth/logout", { method: "POST" }); } catch (e) { /* best-effort - clearing locally regardless */ }
+  finishSignOut(reason === "inactivity" ? "inactivity" : null);
+}
+
+function forceSignOutToLogin(reason) {
+  // The server already rejected the token (revoked/expired) - no point
+  // calling /api/auth/logout again, just clear local state.
+  clearInactivityTimers();
+  hideInactivityWarning();
+  finishSignOut(reason);
+}
+
+function finishSignOut(reason) {
   localStorage.removeItem("dsa_token");
+  state.token = null;
+  if (reason === "inactivity") sessionStorage.setItem("dsa_logout_reason", "inactivity");
   location.reload();
 }
+
+// ---- Inactivity / auto-logout ----
+// Mirrors the backend policy in Settings.session_inactivity_minutes -
+// app/core/config.py. Any mouse/keyboard/scroll/touch event, or any
+// successful api() call, resets the clock.
+const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
+const WARNING_LEAD_MS = 60 * 1000; // show the "still there?" prompt this long before logout
+const SERVER_PING_THROTTLE_MS = 60 * 1000; // cap how often passive activity re-touches the server
+
+let inactivityDeadlineTimer = null;
+let warningShowTimer = null;
+let countdownInterval = null;
+let lastServerPingAt = 0;
+
+function clearInactivityTimers() {
+  clearTimeout(inactivityDeadlineTimer);
+  clearTimeout(warningShowTimer);
+  clearInterval(countdownInterval);
+}
+
+function armInactivityTimers() {
+  clearInactivityTimers();
+  if (!state.token) return;
+  warningShowTimer = setTimeout(showInactivityWarning, INACTIVITY_LIMIT_MS - WARNING_LEAD_MS);
+  inactivityDeadlineTimer = setTimeout(() => logout("inactivity"), INACTIVITY_LIMIT_MS);
+}
+
+function showInactivityWarning() {
+  document.getElementById("inactivity-warning").classList.remove("hidden");
+  let remaining = Math.round(WARNING_LEAD_MS / 1000);
+  const span = document.getElementById("inactivity-countdown");
+  span.textContent = remaining;
+  clearInterval(countdownInterval);
+  countdownInterval = setInterval(() => {
+    remaining -= 1;
+    span.textContent = Math.max(remaining, 0);
+    if (remaining <= 0) clearInterval(countdownInterval);
+  }, 1000);
+}
+
+function hideInactivityWarning() {
+  document.getElementById("inactivity-warning").classList.add("hidden");
+}
+
+function notePassiveActivity() {
+  if (!state.token) return;
+  hideInactivityWarning();
+  armInactivityTimers();
+  const now = Date.now();
+  if (now - lastServerPingAt > SERVER_PING_THROTTLE_MS) {
+    lastServerPingAt = now;
+    api("/api/auth/me").catch(() => {}); // cheap authenticated call, just to refresh server-side last_seen_at
+  }
+}
+
+["mousedown", "mousemove", "keydown", "wheel", "scroll", "touchstart"].forEach(evt =>
+  document.addEventListener(evt, notePassiveActivity, { passive: true })
+);
 
 async function loadBranches() {
   try {
@@ -74,17 +204,39 @@ async function loadBranches() {
   } catch (e) {
     state.branches = []; // requires MANAGE_BRANCHES; that's fine, selects just stay empty otherwise
   }
-  const selects = ["bm-branch-select", "run-branch-select", "exc-branch-select", "user-form-branch", "dsa-form-branch", "admin-dtl-branch"];
-  for (const id of selects) {
+  // Optional/org-wide scope pickers - "(none / all)" is a real choice here.
+  const optionalSelects = ["bm-branch-select", "run-branch-select", "exc-branch-select"];
+  for (const id of optionalSelects) {
     const sel = document.getElementById(id);
     if (!sel) continue;
-    sel.innerHTML = '<option value="">(none / all)</option>' + state.branches.map(b => `<option value="${b.id}">${b.name}</option>`).join("");
+    sel.innerHTML = '<option value="">(none / all)</option>' + branchOptionsHtml();
   }
+  // Branch is mandatory here - no "(none / all)" option, just an
+  // unselected placeholder that submission is blocked on.
+  const requiredSelects = ["dsa-form-branch", "dtl-form-branch"];
+  for (const id of requiredSelects) {
+    const sel = document.getElementById(id);
+    if (!sel) continue;
+    sel.innerHTML = '<option value="">Select a branch…</option>' + branchOptionsHtml();
+  }
+  // user-form-branch is driven by the selected role - see applyUserFormRolePolicy()
+}
+
+function branchOptionsHtml() {
+  return state.branches.map(b => `<option value="${b.id}">${b.name}</option>`).join("");
+}
+
+function headOfficeBranch() {
+  return state.branches.find(b => (b.code || "").toUpperCase() === "HO") || state.branches.find(b => b.name === "Head Office");
 }
 
 function branchName(id) {
   const b = state.branches.find(x => x.id === id);
   return b ? b.name : (id ?? "-");
+}
+
+function needsBranchBadge() {
+  return '<span class="badge severity-WARNING">Needs branch</span>';
 }
 
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -101,34 +253,118 @@ function populatePeriodSelects(monthSelId, yearSelId) {
   yearSel.value = now.getFullYear();
 }
 
+function wireFileDrop(triggerId, inputId, nameId) {
+  const trigger = document.getElementById(triggerId);
+  const input = document.getElementById(inputId);
+  const nameEl = document.getElementById(nameId);
+  trigger.onclick = () => input.click();
+  input.addEventListener("change", () => {
+    nameEl.textContent = input.files.length ? input.files[0].name : "No file chosen";
+  });
+}
+
+function countClass(n, positiveClass) {
+  return n > 0 ? positiveClass : "count-zero";
+}
+
 // ---- Uploads ----
 async function refreshUploads() {
   const uploads = await api("/api/uploads");
+  const pill = document.getElementById("pill-uploads");
+  pill.textContent = uploads.length || "";
+  pill.dataset.count = uploads.length;
+
   const tbody = document.querySelector("#uploads-table tbody");
   tbody.innerHTML = uploads.map(u => `
-    <tr data-id="${u.id}" class="upload-row" style="cursor:pointer">
-      <td>${u.id}</td><td>${u.upload_type}</td><td>${u.branch_id ?? "-"}</td>
-      <td>${u.period_year ? `${MONTH_NAMES[u.period_month - 1].slice(0,3)} ${u.period_year}` : "-"}</td>
+    <tr data-id="${u.id}" class="clickable">
+      <td class="id-col">${u.id}</td><td class="strong">${u.upload_type}</td><td>${u.branch_id ? branchName(u.branch_id) : "-"}</td>
+      <td class="num">${u.period_year ? `${MONTH_NAMES[u.period_month - 1].slice(0,3)} ${u.period_year}` : "-"}</td>
       <td>${u.original_filename}</td>
       <td><span class="status-pill status-${u.status}">${u.status}</span></td>
-      <td>${u.rows_accepted}/${u.total_rows}</td><td>${u.rows_rejected}</td><td>${u.warning_rows}</td>
-      <td>${new Date(u.uploaded_at).toLocaleString()}</td>
+      <td class="num">${u.rows_accepted}</td>
+      <td class="num ${countClass(u.rows_rejected, "count-positive")}">${u.rows_rejected}</td>
+      <td class="num ${countClass(u.warning_rows, "count-warning")}">${u.warning_rows}</td>
+      <td class="muted" style="white-space:nowrap">${new Date(u.uploaded_at).toLocaleString()}</td>
     </tr>`).join("");
-  tbody.querySelectorAll(".upload-row").forEach(row => {
+  tbody.querySelectorAll("tr[data-id]").forEach(row => {
     row.onclick = () => showUploadDetail(row.dataset.id);
   });
+  document.getElementById("uploads-foot").textContent =
+    uploads.length ? "click a row for accepted, rejected and warning detail" : "No uploads yet.";
 }
 
 async function showUploadDetail(id) {
   const u = await api(`/api/uploads/${id}`);
+  renderUploadDetail(u, "rejected");
+}
+
+function exportRowsCsv(rows, filename) {
+  const header = ["Row", "Severity", "Column", "Message"];
+  const csvRows = [header, ...rows.map(e => [e.row_number ?? "", e.severity, e.column_name ?? "", (e.message || "").replace(/"/g, '""')])];
+  const csv = csvRows.map(r => r.map(v => `"${v}"`).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function renderUploadDetail(u, activeTabKey) {
   const el = document.getElementById("upload-detail");
-  if (!u.errors || u.errors.length === 0) {
-    el.innerHTML = `<p><b>Upload #${u.id}</b>: no errors or warnings.</p>`;
-    return;
+  const errors = u.errors || [];
+  const rejected = errors.filter(e => e.severity === "ERROR");
+  const warnings = errors.filter(e => e.severity === "WARNING");
+  const periodLabel = u.period_year ? `${MONTH_NAMES[u.period_month - 1].slice(0, 3)} ${u.period_year}` : "-";
+
+  const tabs = [
+    { key: "rejected", label: `Rejected rows (${rejected.length})`, rows: rejected },
+    { key: "warnings", label: `Warnings (${warnings.length})`, rows: warnings },
+    { key: "accepted", label: `Accepted (${u.rows_accepted})`, rows: null },
+  ];
+  const active = tabs.find(t => t.key === activeTabKey) || tabs[0];
+
+  let bodyHtml;
+  if (active.key === "accepted") {
+    bodyHtml = `<div style="padding:22px; color:#7A756A; font-size:13.5px;">Accepted rows aren't listed individually here - see the Accepted count above; they're stored in the branch/business records this upload updated.</div>`;
+  } else if (active.rows.length === 0) {
+    bodyHtml = `<div style="padding:22px; color:#7A756A; font-size:13.5px;">None.</div>`;
+  } else {
+    bodyHtml = `<div class="table-wrap"><table style="min-width:760px; margin-top:12px">
+      <thead><tr><th>Row</th><th>Severity</th><th>Column</th><th>Message</th></tr></thead>
+      <tbody>${active.rows.map(e => `<tr>
+        <td class="id-col">${e.row_number || "(file/sheet)"}</td>
+        <td><span class="badge severity-${e.severity}">${e.severity}</span></td>
+        <td>${e.column_name ?? ""}</td>
+        <td class="muted">${e.message}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>`;
   }
-  el.innerHTML = `<p><b>Upload #${u.id} issues</b> (${u.errors.length}):</p><table><thead><tr><th>Row</th><th>Severity</th><th>Column</th><th>Message</th></tr></thead><tbody>` +
-    u.errors.map(e => `<tr><td>${e.row_number || "(file/sheet)"}</td><td class="severity-${e.severity}">${e.severity}</td><td>${e.column_name ?? ""}</td><td>${e.message}</td></tr>`).join("") +
-    `</tbody></table>`;
+
+  el.innerHTML = `
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-head" style="border-bottom:2px solid rgba(20,19,16,0.4); align-items:flex-start;">
+        <div>
+          <div style="font-size:11px; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:#7A756A">Upload #${u.id} · ${u.upload_type} · ${periodLabel}</div>
+          <h2 style="font-size:20px; margin-top:5px">${u.original_filename}</h2>
+        </div>
+        <button class="secondary" id="upload-detail-close">Close</button>
+      </div>
+      <div class="stat-strip">
+        <div class="stat-cell"><div class="stat-label">Rows read</div><div class="stat-figure">${u.total_rows}</div></div>
+        <div class="stat-cell success"><div class="stat-label">Accepted</div><div class="stat-figure">${u.rows_accepted}</div></div>
+        <div class="stat-cell error"><div class="stat-label">Rejected</div><div class="stat-figure">${u.rows_rejected}</div></div>
+        <div class="stat-cell warn"><div class="stat-label">Warnings</div><div class="stat-figure">${u.warning_rows}</div></div>
+      </div>
+      <div class="tabstrip">${tabs.map(t => `<button data-tab-key="${t.key}" class="${t.key === active.key ? "active" : ""}">${t.label}</button>`).join("")}</div>
+      ${bodyHtml}
+      <div class="panel-foot">
+        <div>Rejected rows are not stored. Correct the sheet and re-upload - the period upserts, it will not duplicate.</div>
+        <button class="secondary" id="upload-detail-export">Download rejected rows (.csv)</button>
+      </div>
+    </div>`;
+
+  el.querySelectorAll("[data-tab-key]").forEach(btn => { btn.onclick = () => renderUploadDetail(u, btn.dataset.tabKey); });
+  document.getElementById("upload-detail-close").onclick = () => { el.innerHTML = ""; };
+  document.getElementById("upload-detail-export").onclick = () => exportRowsCsv(rejected, `upload_${u.id}_rejected_rows.csv`);
 }
 
 function submitSummary(u) {
@@ -139,7 +375,7 @@ function submitSummary(u) {
 
 async function uploadBranchManagerFile() {
   const fileInput = document.getElementById("bm-file");
-  if (!fileInput.files.length) return flash("Choose a file first", "err");
+  if (!fileInput.files.length) return flash("Select an .xlsx or .xls file before uploading.", "err");
   const fd = new FormData();
   fd.append("file", fileInput.files[0]);
   fd.append("period_month", document.getElementById("bm-period-month").value);
@@ -156,7 +392,7 @@ async function uploadBranchManagerFile() {
 
 async function uploadBusinessManagerFile() {
   const fileInput = document.getElementById("bz-file");
-  if (!fileInput.files.length) return flash("Choose a file first", "err");
+  if (!fileInput.files.length) return flash("Select an .xlsx or .xls file before uploading.", "err");
   const fd = new FormData();
   fd.append("file", fileInput.files[0]);
   fd.append("period_month", document.getElementById("bz-period-month").value);
@@ -175,13 +411,17 @@ async function refreshRuns() {
   const tbody = document.querySelector("#runs-table tbody");
   tbody.innerHTML = runs.map(r => {
     const actions = [];
-    if (r.status === "DRAFT") actions.push(`<button class="secondary" onclick="calcRun(${r.id})">Calculate</button>`);
-    if (hasPerm("REVIEW_COMMISSION_RUN") && r.status === "DRAFT") actions.push(`<button class="secondary" onclick="reviewRun(${r.id})">Review</button>`);
-    if (hasPerm("LOCK_COMMISSION_RUN") && r.status === "REVIEWED") actions.push(`<button onclick="lockRun(${r.id})">Lock</button>`);
-    if (hasPerm("MARK_RUN_PAID") && r.status === "LOCKED") actions.push(`<button class="secondary" onclick="markPaidRun(${r.id})">Mark Paid</button>`);
-    actions.push(`<button class="secondary" onclick="downloadRun(${r.id})">Download</button>`);
-    return `<tr><td>${r.id}</td><td>${r.run_type}</td><td>${r.branch_id ?? "-"}</td><td>${r.period}</td>
-      <td><span class="status-pill status-${r.status}">${r.status}</span></td><td>${actions.join(" ")}</td></tr>`;
+    if (r.status === "DRAFT") actions.push(`<button class="link" onclick="calcRun(${r.id})">Calculate</button>`);
+    if (hasPerm("REVIEW_COMMISSION_RUN") && r.status === "DRAFT") actions.push(`<button class="link" onclick="reviewRun(${r.id})">Mark reviewed</button>`);
+    if (hasPerm("LOCK_COMMISSION_RUN") && r.status === "REVIEWED") actions.push(`<button class="link" onclick="lockRun(${r.id})">Lock run</button>`);
+    if (hasPerm("MARK_RUN_PAID") && r.status === "LOCKED") actions.push(`<button class="link" onclick="markPaidRun(${r.id})">Mark paid</button>`);
+    actions.push(`<button class="link" onclick="downloadRun(${r.id})">Export .xlsx</button>`);
+    return `<tr>
+      <td class="id-col">${r.id}</td><td class="strong">${r.run_type}</td><td>${r.branch_id ? branchName(r.branch_id) : "All branches"}</td>
+      <td class="num">${r.period}</td>
+      <td><span class="status-pill status-${r.status}">${r.status}</span></td>
+      <td><div class="action-links">${actions.join('<span class="sep">·</span>')}</div></td>
+    </tr>`;
   }).join("");
 }
 
@@ -227,6 +467,15 @@ function downloadRun(id) {
 }
 
 // ---- Exceptions ----
+async function refreshSidebarExceptionsPill() {
+  try {
+    const rows = await api("/api/exceptions");
+    const pill = document.getElementById("pill-exceptions");
+    pill.textContent = rows.length || "";
+    pill.dataset.count = rows.length;
+  } catch (e) {}
+}
+
 async function loadExceptions() {
   const period = document.getElementById("exc-period").value.trim() || "";
   const branch_id = document.getElementById("exc-branch-select").value;
@@ -234,12 +483,22 @@ async function loadExceptions() {
   if (period) params.set("period", period);
   if (branch_id) params.set("branch_id", branch_id);
   const rows = await api(`/api/exceptions?${params.toString()}`);
+
+  const counts = { UNMATCHED_IN_BUSINESS_FILE: 0, UNMATCHED_IN_BRANCH_FILE: 0, DUPLICATE: 0, MATCHED_WITH_WARNING: 0, INVALID_TOPUP_BASE: 0 };
+  rows.forEach(r => { if (counts[r.match_status] !== undefined) counts[r.match_status]++; });
+  document.getElementById("stat-unmatched-biz").textContent = counts.UNMATCHED_IN_BUSINESS_FILE;
+  document.getElementById("stat-unmatched-branch").textContent = counts.UNMATCHED_IN_BRANCH_FILE;
+  document.getElementById("stat-duplicates").textContent = counts.DUPLICATE;
+  document.getElementById("stat-warnings").textContent = counts.MATCHED_WITH_WARNING;
+  document.getElementById("stat-invalid-topup-base").textContent = counts.INVALID_TOPUP_BASE;
+
   const tbody = document.querySelector("#exceptions-table tbody");
   tbody.innerHTML = rows.map(r => `<tr>
-    <td class="match-${r.match_status}">${r.match_status}</td><td>${r.branch_name ?? ""}</td><td>${r.client_name ?? ""}</td>
-    <td>${r.client_account_no_branch ?? ""}</td><td>${r.client_account_no_business ?? ""}</td>
-    <td>${r.dsa_code ?? ""} ${r.dsa_name ?? ""}</td><td>${r.loan_type ?? ""}</td><td>${r.disbursement_date ?? ""}</td>
-    <td>${r.notes ?? ""}</td></tr>`).join("");
+    <td><span class="badge match-${r.match_status}">${r.match_status}</span></td><td>${r.branch_name ?? ""}</td><td>${r.client_name ?? ""}</td>
+    <td class="num ${r.client_account_no_branch ? "" : "count-positive"}">${r.client_account_no_branch ?? "—"}</td>
+    <td class="num ${r.client_account_no_business ? "" : "count-positive"}">${r.client_account_no_business ?? "—"}</td>
+    <td>${r.dsa_code ?? ""} ${r.dsa_name ?? ""}</td><td>${r.loan_type ?? ""}</td><td class="num" style="white-space:nowrap">${r.disbursement_date ?? ""}</td>
+    <td class="muted">${r.notes ?? ""}</td></tr>`).join("");
 }
 function downloadExceptions() {
   const period = document.getElementById("exc-period").value.trim();
@@ -258,6 +517,8 @@ function downloadExceptions() {
 function switchAdminSection(name) {
   document.querySelectorAll("#admin-subnav button").forEach(b => b.classList.toggle("active", b.dataset.adminSection === name));
   document.querySelectorAll(".admin-section").forEach(s => s.classList.toggle("hidden", s.id !== `admin-section-${name}`));
+  const meta = PAGE_META.admin[name];
+  if (meta) setPageHeader(meta.crumb, meta.title);
   if (name === "users") refreshUsers();
   if (name === "roles") refreshRoles();
   if (name === "branches") refreshAdminBranches();
@@ -271,31 +532,102 @@ function firstVisibleAdminSection() {
 }
 
 // ---- Admin: Users ----
+let usersCache = [];
+const BRANCH_LOCKED_ROLE = "BRANCH_MANAGER";
+const HEAD_OFFICE_ROLE = "BUSINESS_MANAGER";
+
 async function refreshUsers() {
   if (state.roles.length === 0) await refreshRoles();
   const roleSel = document.getElementById("user-form-role");
   roleSel.innerHTML = state.roles.map(r => `<option value="${r.id}">${r.name}</option>`).join("");
+  applyUserFormRolePolicy(null);
 
-  const users = await api("/api/admin/users");
+  usersCache = await api("/api/admin/users");
   document.querySelector("#admin-users-table tbody").innerHTML =
-    users.map(u => `<tr><td>${u.id}</td><td>${u.email}</td><td>${u.full_name}</td><td>${u.role_name}</td><td>${u.branch_id ? branchName(u.branch_id) : ""}</td></tr>`).join("");
+    usersCache.map(u => {
+      const needsBranch = u.role_name === BRANCH_LOCKED_ROLE && !u.branch_id;
+      const branchCell = needsBranch ? needsBranchBadge() : (u.branch_id ? branchName(u.branch_id) : "");
+      return `<tr><td class="id-col">${u.id}</td><td>${u.email}</td><td class="strong">${u.full_name}</td>
+        <td><span class="status-pill role-badge">${u.role_name}</span></td><td>${branchCell}</td>
+        <td><button class="link" onclick="openUserForm(${u.id})">Edit</button></td></tr>`;
+    }).join("");
 }
 
-async function createUser() {
+// Applies each role's branch policy to the user form: BRANCH_MANAGER must
+// pick exactly one real branch (required dropdown, no "(none / all)");
+// BUSINESS_MANAGER is shown Head Office read-only/pre-filled, not an
+// editable choice, so an admin can't accidentally assign them elsewhere;
+// every other role keeps branch optional/org-wide. Mirrors the server-side
+// policy in app/api/admin/users.py::_resolve_branch_for_role - this is a UX
+// convenience, the backend re-derives and enforces the same rule regardless
+// of what's submitted.
+function applyUserFormRolePolicy(currentBranchId) {
+  const roleId = Number(document.getElementById("user-form-role").value);
+  const role = state.roles.find(r => r.id === roleId);
+  const branchSel = document.getElementById("user-form-branch");
+  const qualifier = document.getElementById("user-form-branch-qualifier");
+
+  if (role && role.name === HEAD_OFFICE_ROLE) {
+    const ho = headOfficeBranch();
+    branchSel.innerHTML = ho ? `<option value="${ho.id}">${ho.name}</option>` : '<option value="">(Head Office branch not found - create it under Branches)</option>';
+    branchSel.value = ho ? ho.id : "";
+    branchSel.disabled = true;
+    qualifier.textContent = "— fixed: Business Manager is always Head Office";
+  } else if (role && role.name === BRANCH_LOCKED_ROLE) {
+    branchSel.disabled = false;
+    branchSel.innerHTML = '<option value="">Select a branch…</option>' + branchOptionsHtml();
+    branchSel.value = currentBranchId ?? "";
+    qualifier.textContent = "— required for Branch Manager";
+  } else {
+    branchSel.disabled = false;
+    branchSel.innerHTML = '<option value="">(none / all)</option>' + branchOptionsHtml();
+    branchSel.value = currentBranchId ?? "";
+    qualifier.textContent = "— optional for org-wide roles";
+  }
+}
+
+function openUserForm(userId) {
+  const user = userId ? usersCache.find(u => u.id === userId) : null;
+  document.getElementById("user-form-id").value = user ? user.id : "";
+  document.getElementById("user-form-email").value = user ? user.email : "";
+  document.getElementById("user-form-email").disabled = !!user; // email is immutable once created
+  document.getElementById("user-form-name").value = user ? user.full_name : "";
+  document.getElementById("user-form-password").value = "";
+  document.getElementById("user-form-password-qualifier").textContent = user ? "— leave blank to keep the current password" : "";
+  document.getElementById("user-form-role").value = user ? user.role_id : (state.roles[0] ? state.roles[0].id : "");
+  applyUserFormRolePolicy(user ? user.branch_id : null);
+  document.getElementById("user-form-save").textContent = user ? "Save User" : "Create User";
+  document.getElementById("user-form").classList.remove("hidden");
+}
+
+async function saveUser() {
+  const id = document.getElementById("user-form-id").value;
   const email = document.getElementById("user-form-email").value.trim();
   const full_name = document.getElementById("user-form-name").value.trim();
   const password = document.getElementById("user-form-password").value;
   const role_id = Number(document.getElementById("user-form-role").value);
+  const role = state.roles.find(r => r.id === role_id);
   const branch_id = document.getElementById("user-form-branch").value || null;
-  if (!email || !full_name || !password || !role_id) return flash("Email, name, password, and role are required", "err");
+
+  if (!full_name || !role_id) return flash("Name and role are required", "err");
+  if (!id && (!email || !password)) return flash("Email and password are required", "err");
+  if (role && role.name === BRANCH_LOCKED_ROLE && !branch_id) return flash("Branch is required for a Branch Manager", "err");
+
   try {
-    await api("/api/admin/users", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, full_name, password, role_id, branch_id: branch_id ? Number(branch_id) : null }),
-    });
-    flash("User created", "ok");
+    if (id) {
+      const payload = { full_name, role_id, branch_id: branch_id ? Number(branch_id) : null };
+      if (password) payload.password = password;
+      await api(`/api/admin/users/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      flash("User updated", "ok");
+    } else {
+      await api("/api/admin/users", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, full_name, password, role_id, branch_id: branch_id ? Number(branch_id) : null }),
+      });
+      flash("User created", "ok");
+    }
     document.getElementById("user-form").classList.add("hidden");
-    ["user-form-email", "user-form-name", "user-form-password"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("user-form-email").disabled = false;
     await refreshUsers();
   } catch (e) { flash(e.message, "err"); }
 }
@@ -309,12 +641,12 @@ async function loadPermissionCatalog() {
 async function refreshRoles() {
   state.roles = await api("/api/admin/roles");
   document.querySelector("#admin-roles-table tbody").innerHTML = state.roles.map(r => {
-    const perms = r.permissions.slice(0, 4).map(p => `<span class="pill">${p}</span>`).join("");
-    const more = r.permissions.length > 4 ? `<span class="pill">+${r.permissions.length - 4} more</span>` : "";
+    const chips = r.permissions.map(p => `<span class="perm-chip">${p}</span>`).join("");
     const actions = [`<button class="link" onclick="openRoleForm(${r.id})">Edit</button>`];
     if (!r.is_system_role) actions.push(`<button class="link" onclick="deleteRole(${r.id})">Delete</button>`);
-    return `<tr><td>${r.name}</td><td>${r.description ?? ""}</td><td>${perms}${more} (${r.permission_count})</td>
-      <td>${r.is_system_role ? "Yes" : "No"}</td><td>${actions.join(" ")}</td></tr>`;
+    return `<tr><td class="strong" style="white-space:nowrap">${r.name}</td><td class="muted">${r.description ?? ""}</td>
+      <td><div class="chip-row">${chips}</div></td>
+      <td>${r.is_system_role ? "Yes" : "No"}</td><td style="white-space:nowrap">${actions.join(" ")}</td></tr>`;
   }).join("");
 }
 
@@ -375,7 +707,7 @@ async function deleteRole(id) {
 async function refreshAdminBranches() {
   const branches = await api("/api/admin/branches");
   document.querySelector("#admin-branches-table tbody").innerHTML =
-    branches.map(b => `<tr><td>${b.id}</td><td>${b.name}</td><td>${b.code ?? ""}</td></tr>`).join("");
+    branches.map(b => `<tr><td class="id-col">${b.id}</td><td class="strong">${b.name}</td><td class="mono">${b.code ?? ""}</td></tr>`).join("");
 }
 
 async function createBranch() {
@@ -393,27 +725,94 @@ async function createBranch() {
   } catch (e) { flash(e.message, "err"); }
 }
 
-// ---- Admin: DTLs ----
-async function refreshDtls() {
-  const dtls = await api("/api/admin/dtls");
-  document.querySelector("#admin-dtls-table tbody").innerHTML =
-    dtls.map(d => `<tr><td>${d.dtl_code}</td><td>${d.dtl_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td></tr>`).join("");
+// ---- Admin: Bulk Update (DSAs/DTLs share this) ----
+function renderBulkUpdateResult(containerId, result) {
+  const el = document.getElementById(containerId);
+  const rowsTable = (rows, label) => rows.length ? `
+    <div class="kicker" style="margin-top:14px">${label} (${rows.length})</div>
+    <div class="table-wrap"><table style="min-width:640px">
+      <thead><tr><th>Row</th><th>Name</th><th>Branch</th><th>Message</th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td class="id-col">${r.row_number}</td><td>${r.name}</td><td>${r.branch}</td><td class="muted">${r.message ?? ""}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>` : "";
+
+  el.innerHTML = `
+    <div class="stat-strip" style="margin-top:16px">
+      <div class="stat-cell"><div class="stat-label">Rows read</div><div class="stat-figure">${result.total_rows}</div></div>
+      <div class="stat-cell success"><div class="stat-label">Updated</div><div class="stat-figure">${result.updated_count}</div></div>
+      <div class="stat-cell"><div class="stat-label">Unchanged</div><div class="stat-figure">${result.unchanged_count}</div></div>
+      <div class="stat-cell error"><div class="stat-label">Unmatched</div><div class="stat-figure">${result.unmatched.length}</div></div>
+      <div class="stat-cell error"><div class="stat-label">Errors</div><div class="stat-figure">${result.errors.length}</div></div>
+    </div>
+    ${result.parse_issues.length ? `<div class="upsert-note" style="margin-top:10px">${result.parse_issues.length} row(s) skipped before matching - ${result.parse_issues.join("; ")}</div>` : ""}
+    ${rowsTable(result.unmatched, "Unmatched — not created, review these")}
+    ${rowsTable(result.errors, "Errors — not applied")}
+  `;
 }
 
-async function createDtl() {
-  const dtl_code = document.getElementById("admin-dtl-code").value.trim();
-  const dtl_name = document.getElementById("admin-dtl-name").value.trim();
-  const branch_id = document.getElementById("admin-dtl-branch").value || null;
-  if (!dtl_code || !dtl_name) return flash("DTL code and name required", "err");
+async function runBulkUpdate(endpoint, fileInputId, resultContainerId, refreshFn) {
+  const fileInput = document.getElementById(fileInputId);
+  if (!fileInput.files.length) return flash("Select a CSV or Excel file first.", "err");
+  const fd = new FormData();
+  fd.append("file", fileInput.files[0]);
   try {
-    await api("/api/admin/dtls", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dtl_code, dtl_name, branch_id: branch_id ? Number(branch_id) : null }),
-    });
-    flash("DTL created", "ok");
+    const result = await api(endpoint, { method: "POST", body: fd });
+    const kind = (result.unmatched.length || result.errors.length) ? "err" : "ok";
+    flash(`Bulk update: ${result.updated_count} updated, ${result.unchanged_count} unchanged, ${result.unmatched.length} unmatched, ${result.errors.length} error(s)`, kind);
+    renderBulkUpdateResult(resultContainerId, result);
+    await refreshFn();
+  } catch (e) { flash(e.message, "err"); }
+}
+
+// ---- Admin: DTLs ----
+let dtlsCache = [];
+
+async function refreshDtls() {
+  dtlsCache = await api("/api/admin/dtls");
+  document.querySelector("#admin-dtls-table tbody").innerHTML = dtlsCache.map(d => `
+    <tr><td class="mono">${d.dtl_code}</td><td class="strong">${d.dtl_name}</td>
+      <td class="tabular">${d.dtl_account_no ?? '<span class="muted">Not set</span>'}</td>
+      <td>${d.branch_id ? branchName(d.branch_id) : needsBranchBadge()}</td>
+      <td><button class="link" onclick="openDtlForm(${d.id})">Edit</button></td>
+    </tr>`).join("");
+}
+
+function openDtlForm(dtlId) {
+  const dtl = dtlId ? dtlsCache.find(d => d.id === dtlId) : null;
+  document.getElementById("dtl-form-id").value = dtl ? dtl.id : "";
+  document.getElementById("dtl-form-code").value = dtl ? dtl.dtl_code : "";
+  document.getElementById("dtl-form-name").value = dtl ? dtl.dtl_name : "";
+  document.getElementById("dtl-form-account").value = dtl ? (dtl.dtl_account_no ?? "") : "";
+  document.getElementById("dtl-form-branch").value = dtl ? (dtl.branch_id ?? "") : "";
+  document.getElementById("dtl-form-code").disabled = !!dtl; // dtl_code is immutable once created
+  document.getElementById("dtl-form").classList.remove("hidden");
+}
+
+async function saveDtl() {
+  const id = document.getElementById("dtl-form-id").value;
+  const dtl_code = document.getElementById("dtl-form-code").value.trim();
+  const dtl_name = document.getElementById("dtl-form-name").value.trim();
+  const dtl_account_no = document.getElementById("dtl-form-account").value.trim() || null;
+  const branch_id = document.getElementById("dtl-form-branch").value || null;
+  if (!dtl_name || (!id && !dtl_code)) return flash("DTL code and name are required", "err");
+  if (!branch_id) return flash("Branch is required", "err");
+  try {
+    if (id) {
+      await api(`/api/admin/dtls/${id}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dtl_name, dtl_account_no, branch_id: branch_id ? Number(branch_id) : null }),
+      });
+      flash("DTL updated", "ok");
+    } else {
+      await api("/api/admin/dtls", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dtl_code, dtl_name, dtl_account_no, branch_id: branch_id ? Number(branch_id) : null }),
+      });
+      flash("DTL created", "ok");
+    }
     document.getElementById("dtl-form").classList.add("hidden");
-    document.getElementById("admin-dtl-code").value = "";
-    document.getElementById("admin-dtl-name").value = "";
+    document.getElementById("dtl-form-code").disabled = false;
     await refreshDtls();
   } catch (e) { flash(e.message, "err"); }
 }
@@ -422,7 +821,7 @@ async function createDtl() {
 async function refreshDsas() {
   const dsas = await api("/api/admin/dsas");
   document.querySelector("#admin-dsas-table tbody").innerHTML = dsas.map(d => `
-    <tr><td>${d.dsa_code}</td><td>${d.dsa_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td>
+    <tr><td class="mono">${d.dsa_code}</td><td class="strong">${d.dsa_name}</td><td>${d.branch_id ? branchName(d.branch_id) : needsBranchBadge()}</td>
       <td>${d.current_dtl_name ? `${d.current_dtl_code} - ${d.current_dtl_name}` : "(unassigned)"}</td>
       <td><button class="link" onclick='openDsaForm(${JSON.stringify(d).replace(/'/g, "&apos;")})'>Edit</button></td>
     </tr>`).join("");
@@ -454,6 +853,7 @@ async function saveDsa() {
   const branch_id = document.getElementById("dsa-form-branch").value || null;
   const dtl_id = document.getElementById("dsa-form-dtl").value || null;
   if (!dsa_code || !dsa_name) return flash("DSA code and name are required", "err");
+  if (!branch_id) return flash("Branch is required", "err");
   const payload = {
     dsa_name, dsa_account_no,
     branch_id: branch_id ? Number(branch_id) : null,
@@ -477,17 +877,21 @@ async function saveDsa() {
 
 // ---- Tabs & wiring ----
 function switchTab(name) {
-  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll("#top-nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("hidden", t.id !== `tab-${name}`));
   if (name === "admin") {
     const first = firstVisibleAdminSection();
     if (first) switchAdminSection(first);
+  } else {
+    document.querySelectorAll("#admin-subnav button").forEach(b => b.classList.remove("active"));
+    const meta = PAGE_META[name];
+    if (meta) setPageHeader(meta.crumb, meta.title);
   }
 }
 
 document.getElementById("login-btn").onclick = login;
 document.getElementById("login-password").addEventListener("keydown", e => { if (e.key === "Enter") login(); });
-document.querySelectorAll("nav button").forEach(b => b.onclick = () => switchTab(b.dataset.tab));
+document.querySelectorAll("#top-nav button").forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 document.getElementById("bm-upload-btn").onclick = uploadBranchManagerFile;
 document.getElementById("bz-upload-btn").onclick = uploadBusinessManagerFile;
 document.getElementById("refresh-uploads").onclick = refreshUploads;
@@ -496,10 +900,12 @@ document.getElementById("refresh-runs").onclick = refreshRuns;
 document.getElementById("exc-load-btn").onclick = loadExceptions;
 document.getElementById("exc-download-btn").onclick = downloadExceptions;
 
-document.querySelectorAll("#admin-subnav button").forEach(b => b.onclick = () => switchAdminSection(b.dataset.adminSection));
+document.querySelectorAll("#admin-subnav button").forEach(b => b.onclick = () => { switchTab("admin"); switchAdminSection(b.dataset.adminSection); });
 
-document.getElementById("toggle-user-form").onclick = () => document.getElementById("user-form").classList.toggle("hidden");
-document.getElementById("user-form-save").onclick = createUser;
+document.getElementById("toggle-user-form").onclick = () => openUserForm(null);
+document.getElementById("user-form-save").onclick = saveUser;
+document.getElementById("user-form-cancel").onclick = () => { document.getElementById("user-form").classList.add("hidden"); document.getElementById("user-form-email").disabled = false; };
+document.getElementById("user-form-role").onchange = () => applyUserFormRolePolicy(null);
 
 document.getElementById("toggle-role-form").onclick = () => openRoleForm(null);
 document.getElementById("role-form-save").onclick = saveRole;
@@ -508,16 +914,43 @@ document.getElementById("role-form-cancel").onclick = () => document.getElementB
 document.getElementById("toggle-branch-form").onclick = () => document.getElementById("branch-form").classList.toggle("hidden");
 document.getElementById("admin-create-branch").onclick = createBranch;
 
-document.getElementById("toggle-dtl-form").onclick = () => document.getElementById("dtl-form").classList.toggle("hidden");
-document.getElementById("admin-create-dtl").onclick = createDtl;
+document.getElementById("toggle-dtl-form").onclick = () => openDtlForm(null);
+document.getElementById("dtl-form-save").onclick = saveDtl;
+document.getElementById("dtl-form-cancel").onclick = () => { document.getElementById("dtl-form").classList.add("hidden"); document.getElementById("dtl-form-code").disabled = false; };
 
 document.getElementById("toggle-dsa-form").onclick = () => openDsaForm(null);
 document.getElementById("dsa-form-save").onclick = saveDsa;
 document.getElementById("dsa-form-cancel").onclick = () => document.getElementById("dsa-form").classList.add("hidden");
 document.getElementById("dsa-form-branch").onchange = (e) => dsaFormLoadDtls(e.target.value || null, null);
 
+document.getElementById("toggle-dtl-bulk-form").onclick = () => document.getElementById("dtl-bulk-form").classList.toggle("hidden");
+document.getElementById("dtl-bulk-upload-btn").onclick = () => runBulkUpdate("/api/admin/dtls/bulk-update", "dtl-bulk-file", "dtl-bulk-result", refreshDtls);
+wireFileDrop("dtl-bulk-file-trigger", "dtl-bulk-file", "dtl-bulk-file-name");
+
+document.getElementById("toggle-dsa-bulk-form").onclick = () => document.getElementById("dsa-bulk-form").classList.toggle("hidden");
+document.getElementById("dsa-bulk-upload-btn").onclick = () => runBulkUpdate("/api/admin/dsas/bulk-update", "dsa-bulk-file", "dsa-bulk-result", refreshDsas);
+wireFileDrop("dsa-bulk-file-trigger", "dsa-bulk-file", "dsa-bulk-file-name");
+
+wireFileDrop("bm-file-trigger", "bm-file", "bm-file-name");
+wireFileDrop("bz-file-trigger", "bz-file", "bz-file-name");
+
 populatePeriodSelects("bm-period-month", "bm-period-year");
 populatePeriodSelects("bz-period-month", "bz-period-year");
+
+document.getElementById("inactivity-stay-btn").onclick = notePassiveActivity;
+
+(function initLoginStats() {
+  const now = new Date();
+  const el = document.getElementById("login-stat-period");
+  if (el) el.textContent = `${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}`;
+})();
+
+(function showLogoutReasonIfAny() {
+  const reason = sessionStorage.getItem("dsa_logout_reason");
+  if (!reason) return;
+  sessionStorage.removeItem("dsa_logout_reason");
+  if (reason === "inactivity") flash("You were signed out due to inactivity.", "info", "login-flash");
+})();
 
 const saved = localStorage.getItem("dsa_token");
 if (saved) { state.token = saved; afterLogin().catch(() => logout()); }

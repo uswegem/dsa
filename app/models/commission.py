@@ -57,7 +57,15 @@ class CommissionLine(Base):
     base_used: Mapped[CommissionBase] = mapped_column(SAEnum(CommissionBase, name="commission_base"), nullable=False)
     base_amount: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
     rate: Mapped[float] = mapped_column(Numeric(6, 4), nullable=False)
-    commission_amount: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
+    commission_amount: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)  # gross - unchanged, still the pre-WHT figure
+
+    # DSA-only (see app/core/config.py::dsa_wht_rate) - left NULL for DTL
+    # lines, whose commission is never WHT-deducted. wht_amount = round(
+    # commission_amount * dsa_wht_rate, 2); net_commission_amount =
+    # commission_amount - wht_amount - the actual payable amount, e.g. for
+    # bank file generation.
+    wht_amount: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    net_commission_amount: Mapped[float | None] = mapped_column(Numeric(18, 2))
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
