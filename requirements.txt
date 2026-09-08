@@ -14,3 +14,11 @@ pandas==2.2.3
 openpyxl==3.1.5
 Jinja2==3.1.5
 python-dotenv==1.0.1
+
+# Test-only, but kept in this single requirements file since that's what
+# both CI's test job and the deploy job's `pip install -r requirements.txt`
+# already use - see .github/workflows/deploy.yml. Was missing here since
+# the pipeline's introduction (cf089b1), which is why `pytest -v` in CI
+# failed with "pytest: command not found" despite tests passing locally
+# (this checkout's venv happened to have it installed separately).
+pytest==9.1.1
