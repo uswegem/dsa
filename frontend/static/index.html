@@ -119,8 +119,10 @@
               <h2>Upload Branch Manager File</h2>
               <div class="kicker">Roster</div>
               <div class="upsert-note">Uploads are upserts: re-uploading for a period already in progress updates existing rows for that period, it never duplicates them. Rows whose DATE falls outside the period you select below are rejected and listed after submit.</div>
-              <label>Branch <span class="qualifier">— admin only, leave blank if the sheet is named after the branch</span></label>
-              <select id="bm-branch-select"></select>
+              <div id="bm-branch-field">
+                <label>Branch <span class="qualifier">— admin only, leave blank if the sheet is named after the branch</span></label>
+                <select id="bm-branch-select"></select>
+              </div>
               <label>Period</label>
               <div style="display:flex; gap:10px;">
                 <select id="bm-period-month" style="flex:1"></select>
@@ -250,6 +252,7 @@
               <button class="secondary" id="toggle-user-form">+ New User</button>
             </div>
             <div id="user-form" class="collapsible hidden">
+              <input type="hidden" id="user-form-id" />
               <div class="grid cols-3">
                 <div>
                   <label>Email</label><input id="user-form-email" type="email" />
@@ -258,21 +261,23 @@
                   <label>Full name</label><input id="user-form-name" />
                 </div>
                 <div>
-                  <label>Password</label><input id="user-form-password" type="password" />
+                  <label>Password <span class="qualifier" id="user-form-password-qualifier"></span></label><input id="user-form-password" type="password" />
                 </div>
                 <div>
                   <label>Role</label><select id="user-form-role"></select>
                 </div>
                 <div>
-                  <label>Branch <span class="qualifier">— branch-scoped roles</span></label><select id="user-form-branch"></select>
+                  <label>Branch <span class="qualifier" id="user-form-branch-qualifier">— required for Branch Manager</span></label>
+                  <select id="user-form-branch"></select>
                 </div>
                 <div class="field-end">
                   <button id="user-form-save">Create User</button>
+                  <button class="secondary" id="user-form-cancel">Cancel</button>
                 </div>
               </div>
             </div>
             <div class="table-wrap">
-              <table id="admin-users-table"><thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Branch</th></tr></thead><tbody></tbody></table>
+              <table id="admin-users-table"><thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Branch</th><th>Actions</th></tr></thead><tbody></tbody></table>
             </div>
           </section>
 
@@ -325,7 +330,20 @@
                 <h2>DSAs</h2>
                 <p class="subtitle">DSAs normally enter the system via Branch Manager uploads. Use this to onboard one before their first sale, or to edit their branch/DTL directly — reassigning a DTL here goes through the same effective-dated history as an upload, it never overwrites past supervision records.</p>
               </div>
-              <button class="secondary" id="toggle-dsa-form" style="white-space:nowrap; flex:none;">+ New DSA</button>
+              <div style="display:flex; gap:10px; flex:none;">
+                <button class="secondary" id="toggle-dsa-bulk-form" style="white-space:nowrap;">Bulk Update</button>
+                <button class="secondary" id="toggle-dsa-form" style="white-space:nowrap;">+ New DSA</button>
+              </div>
+            </div>
+            <div id="dsa-bulk-form" class="collapsible hidden">
+              <div class="upsert-note">Corrects DSA Code / DSA Account No on <strong>existing</strong> DSAs from a CSV/Excel file (columns: DSA_NAME, BRANCH, DSA_CODE, DSA_ACCOUNT_NO). Matches each row to an existing DSA by DSA Name + Branch — case-insensitive, whitespace-trimmed. Never creates a new DSA: a row that doesn't match is reported below, not silently created.</div>
+              <div class="file-drop">
+                <button type="button" class="secondary" id="dsa-bulk-file-trigger">Choose file</button>
+                <span class="file-name" id="dsa-bulk-file-name">No file chosen</span>
+                <input id="dsa-bulk-file" type="file" accept=".csv,.xlsx,.xls" />
+              </div>
+              <button id="dsa-bulk-upload-btn" style="margin-top:14px;">Upload</button>
+              <div id="dsa-bulk-result"></div>
             </div>
             <div id="dsa-form" class="collapsible hidden">
               <input type="hidden" id="dsa-form-id" />
@@ -333,7 +351,7 @@
                 <div><label>DSA Code</label><input id="dsa-form-code" class="mono" /></div>
                 <div><label>DSA Name</label><input id="dsa-form-name" /></div>
                 <div><label>DSA Account No</label><input id="dsa-form-account" class="tabular" /></div>
-                <div><label>Branch</label><select id="dsa-form-branch"></select></div>
+                <div><label>Branch <span class="qualifier">— required</span></label><select id="dsa-form-branch"></select></div>
                 <div><label>DTL</label><select id="dsa-form-dtl"></select></div>
                 <div class="field-end">
                   <button id="dsa-form-save">Save DSA</button>
@@ -352,7 +370,20 @@
           <section id="admin-section-dtls" class="admin-section panel hidden" style="max-width:960px">
             <div class="panel-head">
               <h2>DTLs</h2>
-              <button class="secondary" id="toggle-dtl-form">+ New DTL</button>
+              <div style="display:flex; gap:10px;">
+                <button class="secondary" id="toggle-dtl-bulk-form">Bulk Update</button>
+                <button class="secondary" id="toggle-dtl-form">+ New DTL</button>
+              </div>
+            </div>
+            <div id="dtl-bulk-form" class="collapsible hidden">
+              <div class="upsert-note">Corrects DTL Code / DTL Bank Account on <strong>existing</strong> DTLs from a CSV/Excel file (columns: DTL_NAME, BRANCH, DTL_CODE, DTL_ACCOUNT_NO). Matches each row to an existing DTL by DTL Name + Branch — case-insensitive, whitespace-trimmed. Never creates a new DTL: a row that doesn't match is reported below, not silently created.</div>
+              <div class="file-drop">
+                <button type="button" class="secondary" id="dtl-bulk-file-trigger">Choose file</button>
+                <span class="file-name" id="dtl-bulk-file-name">No file chosen</span>
+                <input id="dtl-bulk-file" type="file" accept=".csv,.xlsx,.xls" />
+              </div>
+              <button id="dtl-bulk-upload-btn" style="margin-top:14px;">Upload</button>
+              <div id="dtl-bulk-result"></div>
             </div>
             <div id="dtl-form" class="collapsible hidden">
               <input type="hidden" id="dtl-form-id" />
@@ -360,7 +391,7 @@
                 <div><label>DTL Code</label><input id="dtl-form-code" class="mono" /></div>
                 <div><label>DTL Name</label><input id="dtl-form-name" /></div>
                 <div><label>DTL Bank Account</label><input id="dtl-form-account" class="tabular" /></div>
-                <div><label>Branch</label><select id="dtl-form-branch"></select></div>
+                <div><label>Branch <span class="qualifier">— required</span></label><select id="dtl-form-branch"></select></div>
                 <div class="field-end">
                   <button id="dtl-form-save">Save DTL</button>
                   <button class="secondary" id="dtl-form-cancel">Cancel</button>

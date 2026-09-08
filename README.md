@@ -65,6 +65,7 @@ frontend/static/           minimal JS/HTML UI
 migrations/                 Alembic
 scripts/seed.py             creates the first ADMIN user
 scripts/seed_dsa_dtl_roster.py  one-time load of a supplied DSA/DTL reference list
+scripts/deploy_summary.py   deploy-time Branch/DSA/DTL count summary - see "Deployment / CI-CD"
 tests/                       pytest - ingestion quirks, upserts, matching, commission math
 ```
 
@@ -120,6 +121,25 @@ Manager's DATE column is informational only and never used for bucketing:
 
 Rates live in `app/core/config.py::Settings` (`dsa_nl_rate`, `dtl_nl_rate`,
 `dsa_rf_rate`, `dtl_rf_rate`), not hardcoded in the calculation logic.
+
+### WHT, SDL, WCF (DSA only - DTL is untouched)
+
+**WHT (Withholding Tax) is deducted, DSA only.** `wht_amount = round(commission_amount
+* Settings.dsa_wht_rate, 2)` (5%), computed per `CommissionLine` at calc
+time alongside `net_commission_amount = commission_amount - wht_amount` -
+the actual payable figure (e.g. for a future bank file). DTL lines never
+get these set (`NULL`) - DTL commission math is completely unchanged.
+
+**SDL and WCF are statutory REPORTING figures only - never deducted** from
+what the DSA is paid. `SDL = Total Amount * 3.5%`, `WCF = Total Amount *
+0.5%` (`Settings.dsa_sdl_rate` / `dsa_wcf_rate`), where Total Amount = that
+DSA's Net Salary (post-WHT) on the run being reported, plus any manual
+`commission_adjustments` already applied to them on that same run (see
+`app/reports/excel.py::_dsa_adjustment_totals`) - there's no automatic
+drop/clawback-from-transactions mechanism yet, only the manual adjustments
+one, so this is the run-scoped default until that's built. Based on how the
+legacy spreadsheet's formulas were structured - confirm with Finance before
+ever changing this to an actual deduction.
 
 ### What "net" means for top-ups (RF)
 
@@ -237,21 +257,26 @@ Manager downloads all come from the same `_add_dsa_summary_sheet` /
 `_add_dtl_summary_sheet`.
 
 **DSA Summary**: DSA Code, DSA Name, Branch, DSA Bank Account (`dsa_account_no`,
-blank/"Not set" if unassigned), New Loans Amount, Topup Loans Amount, Total
-Commission. **DTL Summary**: DTL Name, Branch, DSAs Supervised, DTL Bank
-Account (`dtl_account_no`, "Not set" until backfilled via Admin > DTLs),
-New Loans Amount, Topup Loans Amount, Total Commission.
+blank/"Not set" if unassigned), New Loans Amount, Topup Loans Amount,
+Commission Total (Gross), WHT (5%), Net Salary (the actual payable figure),
+SDL (informational only), WCF (informational only) - plus a sheet footnote
+reiterating that SDL/WCF are statutory reporting figures, not a further
+deduction. See "WHT, SDL, WCF" above. **DTL Summary** (unchanged by that):
+DTL Name, Branch, DSAs Supervised, DTL Bank Account (`dtl_account_no`,
+"Not set" until backfilled via Admin > DTLs), New Loans Amount, Topup Loans
+Amount, Total Commission.
 
 The two Amount columns are summed from the exact same `CommissionLine.base_amount`
-values that produced that row's Total Commission (`aggregate_dsa_summary`
+values that produced that row's Commission Total (`aggregate_dsa_summary`
 / `aggregate_dtl_summary` in `app/reports/excel.py`, kept as pure,
 independently-testable functions for exactly this reason) - so
 `New Loans Amount * dsa_nl_rate + Topup Loans Amount * dsa_rf_rate` always
-equals the row's Total Commission by construction, not by coincidence; see
-`tests/test_topup_base_and_reports.py::test_dsa_and_dtl_summary_amounts_reconcile_with_total_commission`.
-All three amount columns render as real Excel currency cells
-(`number_format = "#,##0.00"`), not raw floats - applied consistently to
-every monetary column across all four sheet types, not just these two.
+equals the row's Commission Total (Gross) by construction, not by
+coincidence, and likewise `Commission Total (Gross) - WHT == Net Salary`;
+see `tests/test_topup_base_and_reports.py::test_dsa_and_dtl_summary_amounts_reconcile_with_total_commission`
+and `tests/test_wht_sdl_wcf.py`. Every monetary column across all four
+sheet types renders as a real Excel currency cell (`number_format =
+"#,##0.00"`), not a raw float.
 
 ## Sessions & auto-logout
 
@@ -352,6 +377,32 @@ a `<=` guard that was only meant to reject stale, late-arriving *upload*
 data - same-day corrections now update the still-open assignment in place
 instead (see `tests/test_roster_sync.py`).
 
+**Bulk Update (DSAs and DTLs)**: `POST /api/admin/dtls/bulk-update` /
+`.../dsas/bulk-update` (`MANAGE_DTLS` / `MANAGE_DSAS`), driven from a "Bulk
+Update" button next to "+ New DTL/DSA". A correction path, not an
+onboarding one - it takes a CSV/Excel file (DTL columns: `DTL_NAME`,
+`BRANCH`, `DTL_CODE`, `DTL_ACCOUNT_NO`; DSA: `DSA_NAME`/`DSA_CODE`/
+`DSA_ACCOUNT_NO` + `BRANCH`) and only ever updates the code/account number
+on an **existing** record - it never creates one. Matching is by (name,
+branch), case-insensitive and whitespace-**trimmed only** (deliberately not
+whitespace-collapsed - real names here legitimately contain internal double
+spaces, e.g. "Neema Jonas  Mussa", and collapsing them would silently break
+a match that should succeed; branch casing like "RUVUMA" vs "Ruvuma" is
+still handled since both sides are lowercased before comparing). A row that
+doesn't match an existing record is never guessed at - it comes back
+`UNMATCHED` in the response for an admin to review (new record? typo?
+branch mismatch?), same as a code collision with another existing record or
+a malformed (non-digit) account number comes back as an `ERROR` row,
+neither applied. Also strips known copy-paste junk (stray tabs/quotes)
+from the code/account number fields before validating them. Shared
+matching/parsing logic: `app/services/bulk_details.py` (`tests/test_bulk_details.py`).
+Used to bulk-correct 34 DTLs' real codes/account numbers from a legacy
+roster export - see "Known assumption worth flagging" below for the two
+DTLs that source file didn't cover, and for the one row (a name mismatch -
+"Geofrey Oziniel" in the system vs "Geofrey  Oziniel Sylvester" in the
+source file) that came back `UNMATCHED` and was deliberately left for an
+admin to review rather than guessed at.
+
 ## Known assumption worth flagging
 
 `app/services/roster_sync.py` keeps `dsas` / `dtls` / `dsa_dtl_assignments`
@@ -363,6 +414,24 @@ blank. The assignment table's `effective_from` is taken from that upload's
 transaction dates (or the upload date if none), since there's no separate
 "assignment change" input file. This is a reasonable default, not something
 explicitly specified - flagged here for review.
+
+Two DTLs found in a real commission file but missing from the app (Jeremia
+Mwakalase - Mbeya; Farida Matola - Tabora) were added via Admin > DTLs
+(`PENDING-035` / `PENDING-036` - the source had no `DTL_CODE` for either, so
+per the existing `PENDING-` convention above, a real code will be adopted
+automatically onto these records the first time a Branch Manager upload
+carries one for a matching name/branch, same as every other `PENDING-`
+DTL). No other data from that legacy spreadsheet was imported.
+
+A later 34-row bulk-update file (see "Bulk Update" above) covered neither
+of those two - still `PENDING-035`/`PENDING-036`, unaffected by this
+task's data load, exactly as expected. That file also had one row
+(`PENDING-032`, "Geofrey Oziniel" in the system, Tanga) come back
+`UNMATCHED` because the source file's name for the same branch was
+"Geofrey  Oziniel Sylvester" - a real name mismatch, not a whitespace/
+casing artifact, so the bulk-update matcher correctly left it alone rather
+than guessing; still `PENDING-032` pending manual review of which name is
+right.
 
 ## Testing
 
@@ -378,8 +447,10 @@ duplicate on re-upload (including the different-period-is-a-different-row
 case), all five match classifications, `UNMATCHED_*` being re-resolved when
 the other file arrives later, the DTL `PENDING-` code reconciliation
 (including the same-name-different-branch non-collision case), same-day
-vs. next-day DTL reassignment history, commission rate math, the
-locked-run-cannot-recalculate guard, permission checks
+vs. next-day DTL reassignment history, commission rate math, the DSA-only
+WHT deduction and SDL/WCF statutory reporting figures (including that DTL
+lines/the DTL Summary report are untouched - `tests/test_wht_sdl_wcf.py`),
+the locked-run-cannot-recalculate guard, permission checks
 (`test_rbac.py::test_user_has_permission_reflects_role_grants`), the
 MANAGE_ROLES lockout guard including the inactive-user edge case
 (`test_rbac.py::test_lockout_guard_*`), the top-up net base formula and
@@ -387,10 +458,14 @@ its zero/negative/missing-component guard, the `INVALID_TOPUP_BASE`
 exception being computed fresh (and clearing itself when the upstream
 figures are corrected, without a re-match), the DSA/DTL Summary report
 amount-columns-reconcile-with-Total-Commission sanity check
-(`test_topup_base_and_reports.py`), and session auth - sliding-window
+(`test_topup_base_and_reports.py`), session auth - sliding-window
 revalidation, revocation on logout, the server-side inactivity backstop,
 and that logging out one session doesn't touch another
-(`test_session_auth.py`).
+(`test_session_auth.py`), and the DSA/DTL Bulk Update matcher - case-
+insensitive/whitespace-trimmed-not-collapsed name+branch matching, never
+creating a record on an unmatched row, code-collision and malformed-
+account-number rejection, and the stray-tab/quote sanitization
+(`test_bulk_details.py`).
 
 ## Deployment / CI-CD
 
@@ -423,6 +498,14 @@ Triggers on push to `master` (the repo's actual default branch - PRs into
    `alembic upgrade head`, `systemctl restart dsa.service`, then polls
    `/api/health` for up to ~20s and **fails the job** (dumping
    `journalctl -u dsa.service`) if the service doesn't come back healthy.
+   Only once that health check has actually passed, it runs
+   `scripts/deploy_summary.py` (as the `dsa` user, against the DB directly -
+   no new credentials/service account needed) and prints "Total Branches"
+   (with names), "Total DSAs", and "Total DTLs" straight into the job log,
+   so a deploy's data state is visible without logging into the app
+   separately. Deliberately **read-only and non-gating**: a failure here
+   (`|| echo ... non-fatal`) never fails an otherwise-healthy deploy - it's
+   for a human to sanity-check the numbers, not an automated threshold.
    A final step re-checks `https://dsa.miracore.co.tz/api/health` from
    outside the box.
 

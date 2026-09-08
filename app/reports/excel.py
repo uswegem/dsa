@@ -24,9 +24,11 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models import (
     BranchSale,
     BusinessTransaction,
+    CommissionAdjustment,
     CommissionLine,
     CommissionRun,
     Dsa,
@@ -35,6 +37,10 @@ from app.models import (
 )
 from app.models.enums import LoanType, MatchStatus, PayeeType, RunStatus
 from app.services.exceptions import EXCEPTION_CATEGORY_LABELS, find_exceptions
+
+settings = get_settings()
+
+SDL_WCF_FOOTNOTE = "SDL and WCF are statutory reporting figures only - not deducted from the DSA's payout."
 
 HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -166,25 +172,37 @@ def aggregate_dsa_summary(lines: list[CommissionLine]) -> dict[int, dict]:
     """Pure aggregation, kept separate from sheet-writing so it's directly
     unit-testable: New Loans Amount / Topup Loans Amount are summed from
     the exact same CommissionLine.base_amount values used to produce
-    Total Commission, so `nl_amount * dsa_nl_rate + rf_amount * dsa_rf_rate
-    == total_commission` always holds by construction - see
-    tests/test_report_aggregation.py.
+    total_commission (the gross figure), so `nl_amount * dsa_nl_rate +
+    rf_amount * dsa_rf_rate == total_commission` always holds by
+    construction - see tests/test_report_aggregation.py.
+
+    wht_amount/net_salary are likewise summed straight from each line's
+    wht_amount/net_commission_amount (set at calc time - see
+    app/services/commission.py), so total_commission - wht_amount ==
+    net_salary holds the same way.
 
     lines: CommissionLine rows for payee_type == DSA.
-    Returns {dsa_id: {"dsa", "branch_name", "nl_amount", "rf_amount", "total_commission"}}.
+    Returns {dsa_id: {"dsa", "branch_name", "nl_amount", "rf_amount",
+    "total_commission" (gross), "wht_amount", "net_salary"}}.
     """
     by_dsa: dict[int, dict] = {}
     for line in lines:
         dsa = line.dsa
         agg = by_dsa.setdefault(
             dsa.id,
-            {"dsa": dsa, "branch_name": dsa.branch.name if dsa.branch else "", "nl_amount": 0.0, "rf_amount": 0.0, "total_commission": 0.0},
+            {
+                "dsa": dsa, "branch_name": dsa.branch.name if dsa.branch else "",
+                "nl_amount": 0.0, "rf_amount": 0.0,
+                "total_commission": 0.0, "wht_amount": 0.0, "net_salary": 0.0,
+            },
         )
         if line.loan_type == LoanType.NL:
             agg["nl_amount"] += float(line.base_amount)
         else:
             agg["rf_amount"] += float(line.base_amount)
         agg["total_commission"] += float(line.commission_amount)
+        agg["wht_amount"] += float(line.wht_amount or 0.0)
+        agg["net_salary"] += float(line.net_commission_amount or 0.0)
     return by_dsa
 
 
@@ -208,35 +226,75 @@ def aggregate_dtl_summary(lines: list[CommissionLine]) -> dict[int, dict]:
     return by_dtl
 
 
+def _dsa_adjustment_totals(db: Session, run: CommissionRun) -> dict[int, float]:
+    """Manual commission_adjustments (see app/api/commission.py::create_adjustment)
+    already applied to this specific run, summed per DSA. amount is signed
+    (negative = clawback). Used only to derive the SDL/WCF basis below - see
+    Settings.dsa_sdl_rate/dsa_wcf_rate docstring for why this run-scoped
+    default was chosen (no automatic drop/clawback-from-transactions
+    mechanism exists yet, only this manual one)."""
+    totals: dict[int, float] = {}
+    rows = (
+        db.query(CommissionAdjustment)
+        .filter(CommissionAdjustment.commission_run_id == run.id, CommissionAdjustment.payee_type == PayeeType.DSA, CommissionAdjustment.dsa_id.isnot(None))
+        .all()
+    )
+    for adj in rows:
+        totals[adj.dsa_id] = totals.get(adj.dsa_id, 0.0) + float(adj.amount)
+    return totals
+
+
 def _add_dsa_summary_sheet(wb: Workbook, db: Session, run: CommissionRun, branch_id: int | None) -> None:
     ws = wb.create_sheet("DSA Summary")
-    headers = ["DSA Code", "DSA Name", "Branch", "DSA Bank Account", "New Loans Amount", "Topup Loans Amount", "Total Commission"]
+    headers = [
+        "DSA Code", "DSA Name", "Branch", "DSA Bank Account",
+        "New Loans Amount", "Topup Loans Amount",
+        "Commission Total (Gross)", "WHT (5%)", "Net Salary",
+        "SDL (informational only)", "WCF (informational only)",
+    ]
     _write_meta_banner(ws, len(headers), run.period, run.status)
     _write_header(ws, headers)
 
     lines = _commission_lines_query(db, run, branch_id).filter(CommissionLine.payee_type == PayeeType.DSA).all()
     by_dsa = aggregate_dsa_summary(lines)
+    adjustment_totals = _dsa_adjustment_totals(db, run)
+
+    amount_cols = (
+        (5, "nl_amount"), (6, "rf_amount"), (7, "total_commission"),
+        (8, "wht_amount"), (9, "net_salary"), (10, "sdl"), (11, "wcf"),
+    )
 
     row_idx = DATA_START_ROW
-    totals = {"nl_amount": 0.0, "rf_amount": 0.0, "total_commission": 0.0}
+    totals = {key: 0.0 for _, key in amount_cols}
     for agg in sorted(by_dsa.values(), key=lambda a: a["dsa"].dsa_name):
         dsa = agg["dsa"]
+        # SDL/WCF basis = Net Salary (post-WHT), plus any manual adjustment
+        # already applied to this DSA on this run - never the gross figure.
+        total_amount = agg["net_salary"] + adjustment_totals.get(dsa.id, 0.0)
+        agg["sdl"] = round(total_amount * settings.dsa_sdl_rate, 2)
+        agg["wcf"] = round(total_amount * settings.dsa_wcf_rate, 2)
+
         row = [dsa.dsa_code, dsa.dsa_name, agg["branch_name"], dsa.dsa_account_no or "Not set"]
         for col, v in enumerate(row, start=1):
             ws.cell(row=row_idx, column=col, value=v)
-        for col, key in ((5, "nl_amount"), (6, "rf_amount"), (7, "total_commission")):
+        for col, key in amount_cols:
             cell = ws.cell(row=row_idx, column=col, value=round(agg[key], 2))
             cell.number_format = CURRENCY_FORMAT
             totals[key] += agg[key]
         row_idx += 1
 
     ws.cell(row=row_idx, column=4, value="TOTAL").font = TOTAL_FONT
-    for col, key in ((5, "nl_amount"), (6, "rf_amount"), (7, "total_commission")):
+    for col, key in amount_cols:
         cell = ws.cell(row=row_idx, column=col, value=round(totals[key], 2))
         cell.font = TOTAL_FONT
         cell.number_format = CURRENCY_FORMAT
     for col in range(1, len(headers) + 1):
         ws.cell(row=row_idx, column=col).fill = TOTAL_FILL
+    row_idx += 1
+
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=len(headers))
+    footnote_cell = ws.cell(row=row_idx, column=1, value=SDL_WCF_FOOTNOTE)
+    footnote_cell.font = Font(italic=True, color="7A756A")
 
     _autosize(ws, headers)
 

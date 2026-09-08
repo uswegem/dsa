@@ -78,17 +78,32 @@ jobs:
 
           # Fail loudly if the service didn't come back up healthy, rather
           # than reporting a green deploy for a dead app.
+          HEALTHY=0
           for i in $(seq 1 10); do
             if curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
               echo "Health check passed."
-              exit 0
+              HEALTHY=1
+              break
             fi
             sleep 2
           done
 
-          echo "Health check FAILED after restart - dumping recent logs:" >&2
-          sudo journalctl -u dsa.service --no-pager -n 50 >&2
-          exit 1
+          if [ "$HEALTHY" != "1" ]; then
+            echo "Health check FAILED after restart - dumping recent logs:" >&2
+            sudo journalctl -u dsa.service --no-pager -n 50 >&2
+            exit 1
+          fi
+
+          # Deploy-time data visibility (Branches/DSAs/DTLs) - purely
+          # informational, printed to the job log so a deploy's data state
+          # is visible without logging into the app separately. Read-only
+          # (scripts/deploy_summary.py never writes), and deliberately
+          # never gates deploy success/failure: the health check above has
+          # already passed, so a problem here (or a "surprising" count) is
+          # for a human to sanity-check, not an automated failure.
+          echo ""
+          echo "=== Deploy-time data summary ==="
+          sudo -u dsa venv/bin/python scripts/deploy_summary.py || echo "WARNING: could not generate deploy summary (non-fatal - deploy still succeeded)"
           REMOTE
 
       - name: Verify externally

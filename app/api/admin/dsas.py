@@ -14,14 +14,16 @@ new one effective today.
 """
 import datetime as dt
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_permission
 from app.models import Dsa, DsaDtlAssignment, Dtl, User
-from app.schemas.common import DsaCreate, DsaOut, DsaUpdate
+from app.schemas.common import BulkUpdateResultOut, DsaCreate, DsaOut, DsaUpdate
 from app.services.audit import log_action
+from app.services.branch_lookup import get_required_branch
+from app.services.bulk_details import apply_bulk_update, parse_bulk_detail_file
 from app.services.roster_sync import sync_assignment
 
 router = APIRouter(prefix="/dsas", dependencies=[Depends(require_permission("MANAGE_DSAS"))])
@@ -60,6 +62,8 @@ def create_dsa(payload: DsaCreate, db: Session = Depends(get_db), current_user: 
     if db.query(Dsa).filter(Dsa.dsa_code == payload.dsa_code).first():
         raise HTTPException(status.HTTP_409_CONFLICT, "A DSA with this code already exists")
 
+    get_required_branch(db, payload.branch_id)
+
     dtl = None
     if payload.dtl_id is not None:
         dtl = db.get(Dtl, payload.dtl_id)
@@ -96,6 +100,7 @@ def update_dsa(dsa_id: int, payload: DsaUpdate, db: Session = Depends(get_db), c
         changes["dsa_account_no"] = {"old": dsa.dsa_account_no, "new": payload.dsa_account_no}
         dsa.dsa_account_no = payload.dsa_account_no
     if payload.branch_id is not None and payload.branch_id != dsa.branch_id:
+        get_required_branch(db, payload.branch_id)
         changes["branch_id"] = {"old": dsa.branch_id, "new": payload.branch_id}
         dsa.branch_id = payload.branch_id
 
@@ -114,3 +119,31 @@ def update_dsa(dsa_id: int, payload: DsaUpdate, db: Session = Depends(get_db), c
     db.commit()
     db.refresh(dsa)
     return _dsa_out(db, dsa)
+
+
+@router.post("/bulk-update", response_model=BulkUpdateResultOut)
+async def bulk_update_dsas(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("MANAGE_DSAS")),
+):
+    """Same bulk-correction pattern as DTLs' bulk-update (see that endpoint's
+    docstring): corrects dsa_code/dsa_account_no on EXISTING DSAs from a
+    CSV/Excel file (columns: DSA_NAME, BRANCH, DSA_CODE, DSA_ACCOUNT_NO),
+    matched by (DSA_NAME, BRANCH) - case-insensitive, trimmed. Never
+    creates a new DSA.
+    """
+    contents = await file.read()
+    try:
+        parsed = parse_bulk_detail_file(contents, file.filename, "dsa")
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+    summary = apply_bulk_update(
+        db, parsed,
+        model=Dsa, name_field="dsa_name", code_field="dsa_code", account_field="dsa_account_no",
+        entity_label="DSA", entity_type_for_audit="Dsa", log_action_name="DSA_BULK_UPDATED",
+        current_user_id=current_user.id,
+    )
+    db.commit()
+    return BulkUpdateResultOut.from_summary(summary)

@@ -39,4 +39,16 @@ class UserCreate(BaseModel):
     password: str
     full_name: str
     role_id: int
+    # Optional at the schema level - whether it's actually required (and
+    # what value wins) depends on the role: BRANCH_MANAGER requires exactly
+    # one branch, BUSINESS_MANAGER is always forced to Head Office
+    # regardless of what's sent. See app/api/admin/users.py::_resolve_branch_for_role.
     branch_id: int | None = None
+
+
+class UserUpdate(BaseModel):
+    full_name: str | None = None
+    role_id: int | None = None
+    branch_id: int | None = None  # None = leave unchanged; role-dependent enforcement, see _resolve_branch_for_role
+    is_active: bool | None = None
+    password: str | None = None  # provide to reset the password; omitted/blank leaves it unchanged

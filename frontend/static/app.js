@@ -103,6 +103,11 @@ async function afterLogin() {
   document.getElementById("page-scope").textContent = branchLabel || "All branches";
   document.getElementById("sidebar-today").textContent = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 
+  // A Branch Manager's uploads are always attributed to their own branch
+  // server-side (see app/api/uploads.py) - there's nothing for them to
+  // choose, so don't show a control that implies otherwise.
+  document.getElementById("bm-branch-field").classList.toggle("hidden", state.user.role_name === "BRANCH_MANAGER");
+
   document.getElementById("admin-nav-group").classList.toggle("hidden", !hasAnyPerm(ADMIN_SECTION_PERMS));
   document.querySelectorAll("#admin-subnav button").forEach(b => {
     b.classList.toggle("hidden", !hasPerm(b.dataset.perm));
@@ -199,17 +204,39 @@ async function loadBranches() {
   } catch (e) {
     state.branches = []; // requires MANAGE_BRANCHES; that's fine, selects just stay empty otherwise
   }
-  const selects = ["bm-branch-select", "run-branch-select", "exc-branch-select", "user-form-branch", "dsa-form-branch", "dtl-form-branch"];
-  for (const id of selects) {
+  // Optional/org-wide scope pickers - "(none / all)" is a real choice here.
+  const optionalSelects = ["bm-branch-select", "run-branch-select", "exc-branch-select"];
+  for (const id of optionalSelects) {
     const sel = document.getElementById(id);
     if (!sel) continue;
-    sel.innerHTML = '<option value="">(none / all)</option>' + state.branches.map(b => `<option value="${b.id}">${b.name}</option>`).join("");
+    sel.innerHTML = '<option value="">(none / all)</option>' + branchOptionsHtml();
   }
+  // Branch is mandatory here - no "(none / all)" option, just an
+  // unselected placeholder that submission is blocked on.
+  const requiredSelects = ["dsa-form-branch", "dtl-form-branch"];
+  for (const id of requiredSelects) {
+    const sel = document.getElementById(id);
+    if (!sel) continue;
+    sel.innerHTML = '<option value="">Select a branch…</option>' + branchOptionsHtml();
+  }
+  // user-form-branch is driven by the selected role - see applyUserFormRolePolicy()
+}
+
+function branchOptionsHtml() {
+  return state.branches.map(b => `<option value="${b.id}">${b.name}</option>`).join("");
+}
+
+function headOfficeBranch() {
+  return state.branches.find(b => (b.code || "").toUpperCase() === "HO") || state.branches.find(b => b.name === "Head Office");
 }
 
 function branchName(id) {
   const b = state.branches.find(x => x.id === id);
   return b ? b.name : (id ?? "-");
+}
+
+function needsBranchBadge() {
+  return '<span class="badge severity-WARNING">Needs branch</span>';
 }
 
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -505,32 +532,102 @@ function firstVisibleAdminSection() {
 }
 
 // ---- Admin: Users ----
+let usersCache = [];
+const BRANCH_LOCKED_ROLE = "BRANCH_MANAGER";
+const HEAD_OFFICE_ROLE = "BUSINESS_MANAGER";
+
 async function refreshUsers() {
   if (state.roles.length === 0) await refreshRoles();
   const roleSel = document.getElementById("user-form-role");
   roleSel.innerHTML = state.roles.map(r => `<option value="${r.id}">${r.name}</option>`).join("");
+  applyUserFormRolePolicy(null);
 
-  const users = await api("/api/admin/users");
+  usersCache = await api("/api/admin/users");
   document.querySelector("#admin-users-table tbody").innerHTML =
-    users.map(u => `<tr><td class="id-col">${u.id}</td><td>${u.email}</td><td class="strong">${u.full_name}</td>
-      <td><span class="status-pill role-badge">${u.role_name}</span></td><td>${u.branch_id ? branchName(u.branch_id) : ""}</td></tr>`).join("");
+    usersCache.map(u => {
+      const needsBranch = u.role_name === BRANCH_LOCKED_ROLE && !u.branch_id;
+      const branchCell = needsBranch ? needsBranchBadge() : (u.branch_id ? branchName(u.branch_id) : "");
+      return `<tr><td class="id-col">${u.id}</td><td>${u.email}</td><td class="strong">${u.full_name}</td>
+        <td><span class="status-pill role-badge">${u.role_name}</span></td><td>${branchCell}</td>
+        <td><button class="link" onclick="openUserForm(${u.id})">Edit</button></td></tr>`;
+    }).join("");
 }
 
-async function createUser() {
+// Applies each role's branch policy to the user form: BRANCH_MANAGER must
+// pick exactly one real branch (required dropdown, no "(none / all)");
+// BUSINESS_MANAGER is shown Head Office read-only/pre-filled, not an
+// editable choice, so an admin can't accidentally assign them elsewhere;
+// every other role keeps branch optional/org-wide. Mirrors the server-side
+// policy in app/api/admin/users.py::_resolve_branch_for_role - this is a UX
+// convenience, the backend re-derives and enforces the same rule regardless
+// of what's submitted.
+function applyUserFormRolePolicy(currentBranchId) {
+  const roleId = Number(document.getElementById("user-form-role").value);
+  const role = state.roles.find(r => r.id === roleId);
+  const branchSel = document.getElementById("user-form-branch");
+  const qualifier = document.getElementById("user-form-branch-qualifier");
+
+  if (role && role.name === HEAD_OFFICE_ROLE) {
+    const ho = headOfficeBranch();
+    branchSel.innerHTML = ho ? `<option value="${ho.id}">${ho.name}</option>` : '<option value="">(Head Office branch not found - create it under Branches)</option>';
+    branchSel.value = ho ? ho.id : "";
+    branchSel.disabled = true;
+    qualifier.textContent = "— fixed: Business Manager is always Head Office";
+  } else if (role && role.name === BRANCH_LOCKED_ROLE) {
+    branchSel.disabled = false;
+    branchSel.innerHTML = '<option value="">Select a branch…</option>' + branchOptionsHtml();
+    branchSel.value = currentBranchId ?? "";
+    qualifier.textContent = "— required for Branch Manager";
+  } else {
+    branchSel.disabled = false;
+    branchSel.innerHTML = '<option value="">(none / all)</option>' + branchOptionsHtml();
+    branchSel.value = currentBranchId ?? "";
+    qualifier.textContent = "— optional for org-wide roles";
+  }
+}
+
+function openUserForm(userId) {
+  const user = userId ? usersCache.find(u => u.id === userId) : null;
+  document.getElementById("user-form-id").value = user ? user.id : "";
+  document.getElementById("user-form-email").value = user ? user.email : "";
+  document.getElementById("user-form-email").disabled = !!user; // email is immutable once created
+  document.getElementById("user-form-name").value = user ? user.full_name : "";
+  document.getElementById("user-form-password").value = "";
+  document.getElementById("user-form-password-qualifier").textContent = user ? "— leave blank to keep the current password" : "";
+  document.getElementById("user-form-role").value = user ? user.role_id : (state.roles[0] ? state.roles[0].id : "");
+  applyUserFormRolePolicy(user ? user.branch_id : null);
+  document.getElementById("user-form-save").textContent = user ? "Save User" : "Create User";
+  document.getElementById("user-form").classList.remove("hidden");
+}
+
+async function saveUser() {
+  const id = document.getElementById("user-form-id").value;
   const email = document.getElementById("user-form-email").value.trim();
   const full_name = document.getElementById("user-form-name").value.trim();
   const password = document.getElementById("user-form-password").value;
   const role_id = Number(document.getElementById("user-form-role").value);
+  const role = state.roles.find(r => r.id === role_id);
   const branch_id = document.getElementById("user-form-branch").value || null;
-  if (!email || !full_name || !password || !role_id) return flash("Email, name, password, and role are required", "err");
+
+  if (!full_name || !role_id) return flash("Name and role are required", "err");
+  if (!id && (!email || !password)) return flash("Email and password are required", "err");
+  if (role && role.name === BRANCH_LOCKED_ROLE && !branch_id) return flash("Branch is required for a Branch Manager", "err");
+
   try {
-    await api("/api/admin/users", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, full_name, password, role_id, branch_id: branch_id ? Number(branch_id) : null }),
-    });
-    flash("User created", "ok");
+    if (id) {
+      const payload = { full_name, role_id, branch_id: branch_id ? Number(branch_id) : null };
+      if (password) payload.password = password;
+      await api(`/api/admin/users/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      flash("User updated", "ok");
+    } else {
+      await api("/api/admin/users", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, full_name, password, role_id, branch_id: branch_id ? Number(branch_id) : null }),
+      });
+      flash("User created", "ok");
+    }
     document.getElementById("user-form").classList.add("hidden");
-    ["user-form-email", "user-form-name", "user-form-password"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("user-form-email").disabled = false;
     await refreshUsers();
   } catch (e) { flash(e.message, "err"); }
 }
@@ -628,6 +725,46 @@ async function createBranch() {
   } catch (e) { flash(e.message, "err"); }
 }
 
+// ---- Admin: Bulk Update (DSAs/DTLs share this) ----
+function renderBulkUpdateResult(containerId, result) {
+  const el = document.getElementById(containerId);
+  const rowsTable = (rows, label) => rows.length ? `
+    <div class="kicker" style="margin-top:14px">${label} (${rows.length})</div>
+    <div class="table-wrap"><table style="min-width:640px">
+      <thead><tr><th>Row</th><th>Name</th><th>Branch</th><th>Message</th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td class="id-col">${r.row_number}</td><td>${r.name}</td><td>${r.branch}</td><td class="muted">${r.message ?? ""}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>` : "";
+
+  el.innerHTML = `
+    <div class="stat-strip" style="margin-top:16px">
+      <div class="stat-cell"><div class="stat-label">Rows read</div><div class="stat-figure">${result.total_rows}</div></div>
+      <div class="stat-cell success"><div class="stat-label">Updated</div><div class="stat-figure">${result.updated_count}</div></div>
+      <div class="stat-cell"><div class="stat-label">Unchanged</div><div class="stat-figure">${result.unchanged_count}</div></div>
+      <div class="stat-cell error"><div class="stat-label">Unmatched</div><div class="stat-figure">${result.unmatched.length}</div></div>
+      <div class="stat-cell error"><div class="stat-label">Errors</div><div class="stat-figure">${result.errors.length}</div></div>
+    </div>
+    ${result.parse_issues.length ? `<div class="upsert-note" style="margin-top:10px">${result.parse_issues.length} row(s) skipped before matching - ${result.parse_issues.join("; ")}</div>` : ""}
+    ${rowsTable(result.unmatched, "Unmatched — not created, review these")}
+    ${rowsTable(result.errors, "Errors — not applied")}
+  `;
+}
+
+async function runBulkUpdate(endpoint, fileInputId, resultContainerId, refreshFn) {
+  const fileInput = document.getElementById(fileInputId);
+  if (!fileInput.files.length) return flash("Select a CSV or Excel file first.", "err");
+  const fd = new FormData();
+  fd.append("file", fileInput.files[0]);
+  try {
+    const result = await api(endpoint, { method: "POST", body: fd });
+    const kind = (result.unmatched.length || result.errors.length) ? "err" : "ok";
+    flash(`Bulk update: ${result.updated_count} updated, ${result.unchanged_count} unchanged, ${result.unmatched.length} unmatched, ${result.errors.length} error(s)`, kind);
+    renderBulkUpdateResult(resultContainerId, result);
+    await refreshFn();
+  } catch (e) { flash(e.message, "err"); }
+}
+
 // ---- Admin: DTLs ----
 let dtlsCache = [];
 
@@ -636,7 +773,7 @@ async function refreshDtls() {
   document.querySelector("#admin-dtls-table tbody").innerHTML = dtlsCache.map(d => `
     <tr><td class="mono">${d.dtl_code}</td><td class="strong">${d.dtl_name}</td>
       <td class="tabular">${d.dtl_account_no ?? '<span class="muted">Not set</span>'}</td>
-      <td>${d.branch_id ? branchName(d.branch_id) : ""}</td>
+      <td>${d.branch_id ? branchName(d.branch_id) : needsBranchBadge()}</td>
       <td><button class="link" onclick="openDtlForm(${d.id})">Edit</button></td>
     </tr>`).join("");
 }
@@ -659,6 +796,7 @@ async function saveDtl() {
   const dtl_account_no = document.getElementById("dtl-form-account").value.trim() || null;
   const branch_id = document.getElementById("dtl-form-branch").value || null;
   if (!dtl_name || (!id && !dtl_code)) return flash("DTL code and name are required", "err");
+  if (!branch_id) return flash("Branch is required", "err");
   try {
     if (id) {
       await api(`/api/admin/dtls/${id}`, {
@@ -683,7 +821,7 @@ async function saveDtl() {
 async function refreshDsas() {
   const dsas = await api("/api/admin/dsas");
   document.querySelector("#admin-dsas-table tbody").innerHTML = dsas.map(d => `
-    <tr><td class="mono">${d.dsa_code}</td><td class="strong">${d.dsa_name}</td><td>${d.branch_id ? branchName(d.branch_id) : ""}</td>
+    <tr><td class="mono">${d.dsa_code}</td><td class="strong">${d.dsa_name}</td><td>${d.branch_id ? branchName(d.branch_id) : needsBranchBadge()}</td>
       <td>${d.current_dtl_name ? `${d.current_dtl_code} - ${d.current_dtl_name}` : "(unassigned)"}</td>
       <td><button class="link" onclick='openDsaForm(${JSON.stringify(d).replace(/'/g, "&apos;")})'>Edit</button></td>
     </tr>`).join("");
@@ -715,6 +853,7 @@ async function saveDsa() {
   const branch_id = document.getElementById("dsa-form-branch").value || null;
   const dtl_id = document.getElementById("dsa-form-dtl").value || null;
   if (!dsa_code || !dsa_name) return flash("DSA code and name are required", "err");
+  if (!branch_id) return flash("Branch is required", "err");
   const payload = {
     dsa_name, dsa_account_no,
     branch_id: branch_id ? Number(branch_id) : null,
@@ -763,8 +902,10 @@ document.getElementById("exc-download-btn").onclick = downloadExceptions;
 
 document.querySelectorAll("#admin-subnav button").forEach(b => b.onclick = () => { switchTab("admin"); switchAdminSection(b.dataset.adminSection); });
 
-document.getElementById("toggle-user-form").onclick = () => document.getElementById("user-form").classList.toggle("hidden");
-document.getElementById("user-form-save").onclick = createUser;
+document.getElementById("toggle-user-form").onclick = () => openUserForm(null);
+document.getElementById("user-form-save").onclick = saveUser;
+document.getElementById("user-form-cancel").onclick = () => { document.getElementById("user-form").classList.add("hidden"); document.getElementById("user-form-email").disabled = false; };
+document.getElementById("user-form-role").onchange = () => applyUserFormRolePolicy(null);
 
 document.getElementById("toggle-role-form").onclick = () => openRoleForm(null);
 document.getElementById("role-form-save").onclick = saveRole;
@@ -781,6 +922,14 @@ document.getElementById("toggle-dsa-form").onclick = () => openDsaForm(null);
 document.getElementById("dsa-form-save").onclick = saveDsa;
 document.getElementById("dsa-form-cancel").onclick = () => document.getElementById("dsa-form").classList.add("hidden");
 document.getElementById("dsa-form-branch").onchange = (e) => dsaFormLoadDtls(e.target.value || null, null);
+
+document.getElementById("toggle-dtl-bulk-form").onclick = () => document.getElementById("dtl-bulk-form").classList.toggle("hidden");
+document.getElementById("dtl-bulk-upload-btn").onclick = () => runBulkUpdate("/api/admin/dtls/bulk-update", "dtl-bulk-file", "dtl-bulk-result", refreshDtls);
+wireFileDrop("dtl-bulk-file-trigger", "dtl-bulk-file", "dtl-bulk-file-name");
+
+document.getElementById("toggle-dsa-bulk-form").onclick = () => document.getElementById("dsa-bulk-form").classList.toggle("hidden");
+document.getElementById("dsa-bulk-upload-btn").onclick = () => runBulkUpdate("/api/admin/dsas/bulk-update", "dsa-bulk-file", "dsa-bulk-result", refreshDsas);
+wireFileDrop("dsa-bulk-file-trigger", "dsa-bulk-file", "dsa-bulk-file-name");
 
 wireFileDrop("bm-file-trigger", "bm-file", "bm-file-name");
 wireFileDrop("bz-file-trigger", "bz-file", "bz-file-name");

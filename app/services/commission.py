@@ -7,6 +7,13 @@ Disbursement date - see MatchedTransaction.commission_period):
   DTL: 1% of gross sales for New Loans, 1% of net sales for Top-ups,
        for the DSAs under their supervision
 
+DSA-only deduction: WHT (Withholding Tax, Settings.dsa_wht_rate = 5%) is
+deducted from each DSA CommissionLine's commission_amount, stored alongside
+it as wht_amount/net_commission_amount - net_commission_amount is the
+actual payable figure. DTL commission is never WHT-deducted. SDL/WCF are
+statutory REPORTING figures only (never deducted) - computed in the DSA
+Summary report, not stored per line - see app/reports/excel.py.
+
 Gross = Business Manager Disbursement Amt (NL rows).
 Net   = configurable basis, currently Business Manager Appl Amount minus
         Letshego Topup (RF rows) - see Settings.net_topup_minuend_field /
@@ -170,6 +177,11 @@ def calculate_commission_run(db: Session, run: CommissionRun) -> CalculationResu
 
         base_amount = float(base_amount)
 
+        dsa_commission_amount = round(base_amount * dsa_rate, 2)
+        # WHT is deducted for DSAs only - see Settings.dsa_wht_rate. DTL
+        # commission below is untouched: no WHT, no wht_amount/
+        # net_commission_amount set.
+        dsa_wht_amount = round(dsa_commission_amount * settings.dsa_wht_rate, 2)
         db.add(
             CommissionLine(
                 commission_run_id=run.id,
@@ -181,7 +193,9 @@ def calculate_commission_run(db: Session, run: CommissionRun) -> CalculationResu
                 base_used=base_used,
                 base_amount=base_amount,
                 rate=dsa_rate,
-                commission_amount=round(base_amount * dsa_rate, 2),
+                commission_amount=dsa_commission_amount,
+                wht_amount=dsa_wht_amount,
+                net_commission_amount=round(dsa_commission_amount - dsa_wht_amount, 2),
             )
         )
         result.lines_created += 1

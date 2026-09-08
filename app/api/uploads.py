@@ -60,8 +60,11 @@ async def upload_branch_manager_file(
     (or is missing/unparseable) are rejected, not silently accepted.
 
     Branch scoping: a user with a branch_id assigned (e.g. a Branch
-    Manager) is always restricted to their own branch, regardless of what
-    the form/sheets say. A user with no branch_id (org-wide, e.g. Admin)
+    Manager - branch is now mandatory for that role, see Admin > Users) is
+    always restricted to their own branch, regardless of what the
+    form/sheets say - branch_id from the request is never trusted for
+    attribution once the caller is branch-scoped, only current_user's own
+    assigned branch is. A user with no branch_id (org-wide, e.g. Admin)
     may target any branch - explicitly via branch_id, or via matching
     sheet names for a multi-sheet bulk/migration upload.
     """

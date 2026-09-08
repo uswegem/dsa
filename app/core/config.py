@@ -73,6 +73,25 @@ class Settings(BaseSettings):
     net_topup_minuend_field: str = "appl_amount"
     net_topup_subtrahend_field: str = "letshego_topup"
 
+    # --- DSA statutory deductions/reporting figures ------------------------
+    # DSA only - DTL commission is untouched by any of these.
+    #
+    # WHT (Withholding Tax) IS deducted: Net Salary (the actual payable
+    # amount) = Commission Total (gross) - WHT. See
+    # app/services/commission.py - computed per CommissionLine so it stays
+    # linear with the existing per-line rate math, then summed like every
+    # other report figure.
+    dsa_wht_rate: float = 0.05
+
+    # SDL/WCF are statutory REPORTING figures only - computed but never
+    # subtracted from what the DSA is paid. Basis is Net Salary (post-WHT),
+    # adjusted by any commission_adjustments already applied to that DSA on
+    # the run being reported (see app/reports/excel.py::_add_dsa_summary_sheet).
+    # Per the legacy spreadsheet this replaces; confirm with Finance before
+    # ever changing this to an actual deduction.
+    dsa_sdl_rate: float = 0.035
+    dsa_wcf_rate: float = 0.005
+
 
 @lru_cache
 def get_settings() -> Settings:
