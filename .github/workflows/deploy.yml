@@ -56,8 +56,17 @@ jobs:
             --exclude='uploads/' \
             --exclude='__pycache__/' \
             --exclude='*.pyc' \
+            --exclude='.cache/' \
             -e "ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts" \
             ./ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/dsa/
+          # .cache/ (pip's cache, e.g. .cache/pip/http-v2/... - created under
+          # $HOME/.cache when "Install deps..." below runs pip as `sudo -u dsa`,
+          # and dsa's $HOME is /opt/dsa) is server-side runtime state, not part
+          # of the deployed source - same category as venv/uploads/__pycache__
+          # above. --delete was trying to remove it every run, but rsync
+          # connects as DEPLOY_USER (not dsa, and not root), which doesn't own
+          # those dsa:dsa-owned files - every one of those deletions failed
+          # with "Permission denied", which is what actually failed this step.
 
       - name: Install deps, migrate, restart, health-check
         run: |
